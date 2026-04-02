@@ -25,6 +25,7 @@ class IdentityManagerTypes(enum.Enum):
     DB = "db"
     NOAUTH = "noauth"
     OAUTH2PROXY = "oauth2proxy"
+    KEYCLOAK_NOADMIN = "keycloak_noadmin"
 
 
 class IdentityManagerFactory:

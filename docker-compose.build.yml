@@ -1,0 +1,16 @@
+services:
+  keep-frontend:
+    image: muxa1l/keep-ui:latest
+    build:
+      context: ./keep-ui
+      dockerfile: ../docker/Dockerfile.ui
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+
+  keep-backend:
+    image: muxa1l/keep-api:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args:
+        BUILDKIT_INLINE_CACHE: 1

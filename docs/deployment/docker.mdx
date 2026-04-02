@@ -30,6 +30,21 @@ The docker-compose.yml contains 3 services:
 - [keep-frontend](https://console.cloud.google.com/artifacts/docker/keephq/us-central1/keep/keep-ui?project=keephq) - a nextjs app that serves as Keep UI interface.
 - [keep-websocket-server](https://docs.soketi.app/getting-started/installation/docker) - Soketi (a pusher compatible websocket server) for real time alerting.
 
+### Build production images locally
+Use `docker-compose.build.yml` when you want to build the production API and UI images from the repository source instead of pulling prebuilt images:
+
+```shell
+docker compose -f docker-compose.build.yml build
+```
+
+You can override the output image tags if you want to load them into a different registry or attach a custom tag:
+
+```shell
+KEEP_FRONTEND_IMAGE=ghcr.io/your-org/keep-ui:latest \
+KEEP_BACKEND_IMAGE=ghcr.io/your-org/keep-api:latest \
+docker compose -f docker-compose.build.yml build
+```
+
 ### Reinstall Keep with the option to refresh from scratch
 
 `Caution:` This usage context will refresh from the beginning and Keep's data and settings will be erased. Even other containers on this host are also erased. So please consider when using the steps below.

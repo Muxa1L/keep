@@ -178,6 +178,44 @@ def test_keycloak_sanity(db_session, keycloak_client, keycloak_token, client, te
 @pytest.mark.parametrize(
     "test_app",
     [
+        {
+            "AUTH_TYPE": "KEYCLOAK_NOADMIN",
+            "KEYCLOAK_USE_ADMIN_ENDPOINTS": "false",
+            "KEYCLOAK_URL": "http://localhost:8787/auth/",
+            "KEYCLOAK_REALM": "keeptest",
+            "KEYCLOAK_CLIENT_ID": "keep",
+        }
+    ],
+    indirect=True,
+)
+def test_keycloak_noadmin_uses_predefined_roles(client, test_app):
+    with patch(
+        "keep.identitymanager.identity_managers.keycloak_noadmin.keycloak_noadmin_authverifier.jwt.PyJWKClient.get_signing_key_from_jwt",
+        return_value=MockSigningKey(key="mock_key"),
+    ), patch(
+        "keep.identitymanager.identity_managers.keycloak_noadmin.keycloak_noadmin_authverifier.jwt.decode",
+        return_value={
+            "preferred_username": "admin@external-keycloak.com",
+            "keep_role": "admin",
+            "iss": "http://localhost:8787/auth/realms/keeptest",
+        },
+    ):
+        whoami_response = client.get(
+            "/whoami", headers={"Authorization": f"Bearer {MOCK_TOKEN}"}
+        )
+        assert whoami_response.status_code == 200
+        assert whoami_response.json() == {"tenant_id": SINGLE_TENANT_UUID}
+
+        roles_response = client.get(
+            "/auth/roles", headers={"Authorization": f"Bearer {MOCK_TOKEN}"}
+        )
+        assert roles_response.status_code == 200
+        assert any(role["name"] == "admin" for role in roles_response.json())
+
+
+@pytest.mark.parametrize(
+    "test_app",
+    [
         {"AUTH_TYPE": "SINGLE_TENANT", "KEEP_IMPERSONATION_ENABLED": "true"},
     ],
     indirect=True,

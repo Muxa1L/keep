@@ -8,7 +8,7 @@ Keep Enterprise On-Premises: ✅ <br/>
 Keep Open Source: ⛔️
 </Tip>
 
-<Tip>Keep supports Keycloak in a "managed" way where Keep auto-provisions all resources (realm, client, etc.). Keep can also work with externally managed Keycloak. To learn how, please contact the team on [Slack](https://slack.keephq.dev).</Tip>
+<Tip>Keep supports two backend modes for Keycloak: a managed mode where Keep uses Keycloak admin APIs to provision resources, and an externally managed mode where Keep only validates tokens and maps users to the predefined Keep roles.</Tip>
 
 Keep integrates with Keycloak to provide a powerful and flexible authentication system for multi-tenant applications, supporting Single Sign-On (SSO) and SAML.
 
@@ -28,6 +28,13 @@ Keep integrates with Keycloak to provide a powerful and flexible authentication 
 ### Setup Instructions
 
 To start Keep with Keycloak authentication, set the following environment variables:
+
+### Deployment Modes
+
+| Mode | Description | Uses Keycloak Admin Endpoints | Best For |
+|--------------------|-----------|:--------:|:-------------:|
+| Managed | Keep provisions scopes, resources, permissions, and roles in Keycloak | Yes | Keep-managed Keycloak deployments |
+| Externally managed | Keycloak is managed outside of Keep and Keep only verifies tokens on the backend | No | Existing Keycloak realms where admin API access is not allowed |
 
 #### Frontend Environment Variables
 
@@ -50,6 +57,54 @@ To start Keep with Keycloak authentication, set the following environment variab
 | KEYCLOAK_ADMIN_USER | Admin username for Keycloak | Yes | keep_admin |
 | KEYCLOAK_ADMIN_PASSWORD | Admin password for Keycloak | Yes | keep_admin |
 | KEYCLOAK_AUDIENCE | Audience for Keycloak | Yes | realm-management |
+
+### Externally Managed Keycloak
+
+If your Keycloak realm, client, and roles are managed outside Keep, you can run the Keep backend without using any Keycloak admin endpoints.
+
+Set the backend environment variable below:
+
+| Environment Variable | Description | Required | Default Value |
+|--------------------|-----------|:--------:|:-------------:|
+| KEYCLOAK_USE_ADMIN_ENDPOINTS | Set to `false` to disable all Keycloak admin API usage in the backend | Yes | `true` |
+
+In this mode:
+
+- Keep still uses `AUTH_TYPE=KEYCLOAK`.
+- The backend validates bearer tokens using Keycloak JWKS and the issuer derived from `KEYCLOAK_ISSUER` or from `KEYCLOAK_URL` + `KEYCLOAK_REALM`.
+- Keep maps users to the predefined Keep roles instead of creating roles in Keycloak.
+- No database schema changes are required.
+- `KEYCLOAK_ADMIN_USER`, `KEYCLOAK_ADMIN_PASSWORD`, and the admin audience are not required by the backend.
+
+### Role Mapping in No-Admin Mode
+
+The backend maps Keycloak claims to the predefined Keep roles:
+
+- `admin`
+- `noc`
+- `webhook`
+- `workflowrunner`
+
+Role resolution happens in this order:
+
+1. `keep_role` claim
+2. Client roles under `resource_access.<KEYCLOAK_CLIENT_ID>.roles`
+3. Realm roles under `realm_access.roles`
+
+For single-tenant setups, if the token does not include `keep_tenant_id`, Keep falls back to the default single tenant.
+
+If `KEYCLOAK_ROLES_FROM_GROUPS=true` is enabled, Keep continues to support the existing group-based organization mapping flow and exposes `/auth/user/orgs` for tenant switching.
+
+### Limitations of No-Admin Mode
+
+Because Keep does not call the Keycloak admin APIs in this mode, the backend does not provision or manage Keycloak resources. The following backend management operations are intentionally disabled:
+
+- User creation, update, and deletion through Keep
+- Group creation, update, and deletion through Keep
+- Custom role creation, update, and deletion through Keep
+- Resource permission creation through Keep
+
+The predefined Keep roles are still available through the backend role listing APIs.
 
 
 ### Example configuration
