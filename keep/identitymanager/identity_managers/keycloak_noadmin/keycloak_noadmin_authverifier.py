@@ -45,6 +45,8 @@ class KeycloakNoadminAuthVerifier(AuthVerifierBase):
         self.roles_from_groups = config(
             "KEYCLOAK_ROLES_FROM_GROUPS", default=False, cast=bool
         )
+        if not self.roles_from_groups:
+            return
         self.groups_claims = config("KEYCLOAK_GROUPS_CLAIM", default="groups")
         self.groups_claims_admin = config(
             "KEYCLOAK_GROUPS_CLAIM_ADMIN", default="admin"
