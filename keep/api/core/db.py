@@ -2085,6 +2085,19 @@ def delete_user(username):
             session.commit()
 
 
+def get_user_role(tenant_id, username):
+    """Return the stored role for a user, or None if the user does not exist."""
+    from keep.api.models.db.user import User
+
+    with Session(engine) as session:
+        user = session.exec(
+            select(User)
+            .where(User.tenant_id == tenant_id)
+            .where(User.username == username)
+        ).first()
+    return user.role if user else None
+
+
 def user_exists(tenant_id, username):
     from keep.api.models.db.user import User
 

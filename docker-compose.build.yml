@@ -1,6 +1,6 @@
 services:
   keep-frontend:
-    image: muxa1l/keep-ui:0.54.4
+    image: muxa1l/keep-ui:0.54.5
     build:
       context: ./keep-ui
       dockerfile: ../docker/Dockerfile.ui
@@ -8,7 +8,7 @@ services:
         BUILDKIT_INLINE_CACHE: 1
 
   keep-backend:
-    image: muxa1l/keep-api:0.54.4
+    image: muxa1l/keep-api:0.54.5
     build:
       context: .
       dockerfile: docker/Dockerfile.api

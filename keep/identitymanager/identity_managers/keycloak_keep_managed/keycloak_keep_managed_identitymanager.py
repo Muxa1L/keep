@@ -69,5 +69,32 @@ class KeycloakKeepManagedIdentityManager(BaseIdentityManager):
     def update_user(self, user_email: str, update_data: dict) -> User:
         raise NotImplementedError("KeycloakKeepManagedIdentityManager.update_user")
 
+    def create_role(self, role):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Custom role creation is not supported for AUTH_TYPE=keycloak_keep_managed. "
+                "This auth mode only supports the built-in Keep roles: admin, noc, webhook, workflowrunner."
+            ),
+        )
+
+    def update_role(self, role_id: str, role):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Custom role updates are not supported for AUTH_TYPE=keycloak_keep_managed. "
+                "This auth mode only supports the built-in Keep roles."
+            ),
+        )
+
+    def delete_role(self, role_id: str) -> None:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Custom role deletion is not supported for AUTH_TYPE=keycloak_keep_managed. "
+                "This auth mode only supports the built-in Keep roles."
+            ),
+        )
+
     def get_auth_verifier(self, scopes: list) -> KeycloakKeepManagedAuthVerifier:
         return KeycloakKeepManagedAuthVerifier(scopes)

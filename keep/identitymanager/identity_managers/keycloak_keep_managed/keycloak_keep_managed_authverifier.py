@@ -3,7 +3,12 @@ import os
 from fastapi import HTTPException
 
 from keep.api.core.config import config
-from keep.api.core.db import create_user, update_user_last_sign_in, user_exists
+from keep.api.core.db import (
+    create_user,
+    get_user_role,
+    update_user_last_sign_in,
+    user_exists,
+)
 from keep.api.core.dependencies import SINGLE_TENANT_UUID
 from keep.identitymanager.authenticatedentity import AuthenticatedEntity
 from keep.identitymanager.authverifierbase import AuthVerifierBase
@@ -113,7 +118,15 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
                 detail="Keycloak token is missing the email claim",
             )
 
-        role = self._extract_role(payload)
+        token_role = self._extract_role(payload)
+        if token_role is None:
+            # No role in token — use whatever is stored in Keep's DB for this user.
+            # Falls back to the default role when the user is brand-new.
+            token_role = get_user_role(SINGLE_TENANT_UUID, email) or _DEFAULT_ROLE
+            self.logger.debug(
+                "No role in JWT; resolved from DB as '%s' for %s", token_role, email
+            )
+        role = token_role
         # Validate the role exists in Keep's RBAC before touching the DB
         get_role_by_role_name(role)  # raises 403 if unknown
 
@@ -141,9 +154,12 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _extract_role(self, payload: dict) -> str:
+    def _extract_role(self, payload: dict) -> str | None:
         """
         Determine the Keep role from the decoded JWT payload.
+
+        Returns None when no recognised Keep role is present in the token,
+        allowing the caller to fall back to the role stored in Keep's DB.
 
         Priority order:
         1. Custom claim configured via KEYCLOAK_ROLE_CLAIM env var
@@ -186,10 +202,8 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
         if keep_role:
             return keep_role
 
-        self.logger.debug(
-            "No role found in Keycloak token; defaulting to '%s'", _DEFAULT_ROLE
-        )
-        return _DEFAULT_ROLE
+        self.logger.debug("No role found in Keycloak token")
+        return None
 
     @staticmethod
     def _normalize_role(raw: str) -> str | None:

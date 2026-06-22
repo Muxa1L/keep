@@ -113,7 +113,8 @@ class TestExtractRole:
 
     def test_default_role_when_nothing_present(self, verifier_env):
         verifier = _make_verifier()
-        assert verifier._extract_role({}) == "noc"
+        # _extract_role returns None when no role in token; caller resolves via DB
+        assert verifier._extract_role({}) is None
 
     def test_custom_role_claim_env(self, monkeypatch, verifier_env):
         monkeypatch.setenv("KEYCLOAK_ROLE_CLAIM", "my_role")
@@ -123,8 +124,9 @@ class TestExtractRole:
 
     def test_unknown_role_normalises_to_noc(self, verifier_env):
         verifier = _make_verifier()
+        # All roles are non-Keep names → _select_best_role returns None
         payload = {"resource_access": {"keep": {"roles": ["superuser"]}}}
-        assert verifier._extract_role(payload) == "noc"
+        assert verifier._extract_role(payload) is None
 
     def test_admin_role_selected_even_if_not_first_client_role(self, verifier_env):
         verifier = _make_verifier()
@@ -188,16 +190,32 @@ class TestVerifyBearerToken:
         assert any(u.username == email for u in users)
 
     def test_new_user_default_role_is_noc(self, verifier_env, db_session):
-        from keep.api.core.db import get_users
-
         email = "defaultrole@auto.com"
-        # Token with no role information but a valid email
+        # Token with no role information — user also doesn’t exist in DB yet— must default to noc
         payload = {
             "email": email,
             "iat": int(time.time()),
             "exp": int(time.time()) + 3600,
         }
         v = self._verifier_with_decode(payload)
+        entity = v._verify_bearer_token("fake-token")
+        assert entity.role == "noc"
+
+    def test_no_role_in_token_uses_db_role(self, verifier_env, db_session):
+        from keep.api.core.db import create_user
+
+        email = "existing-admin@test.com"
+        # Pre-create the user in DB with admin role
+        create_user(tenant_id=SINGLE_TENANT_UUID, username=email, password="", role="admin")
+        # Token carries no role information
+        payload = {
+            "email": email,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        }
+        v = self._verifier_with_decode(payload)
+        entity = v._verify_bearer_token("fake-token")
+        assert entity.role == "admin"
         entity = v._verify_bearer_token("fake-token")
         assert entity.role == "noc"
 
