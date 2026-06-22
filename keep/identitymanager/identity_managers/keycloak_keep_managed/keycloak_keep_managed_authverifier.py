@@ -34,6 +34,12 @@ def _patched_cm_init(
 ConnectionManager.__init__ = _patched_cm_init
 
 _DEFAULT_ROLE = Roles.NOC.value
+_ROLE_PRIORITY = [
+    Roles.ADMIN.value,
+    Roles.NOC.value,
+    Roles.WEBHOOK.value,
+    Roles.WORKFLOW_RUNNER.value,
+]
 
 
 class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
@@ -57,6 +63,9 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
     KEYCLOAK_ROLE_CLAIM     – JWT claim that carries the Keep role; defaults to
                               checking resource_access -> realm_access -> keep_role,
                               and falls back to 'noc'
+
+    Note: the `email` claim in the JWT is used as the user identifier and is
+    required.  Tokens that do not contain an `email` claim are rejected.
     """
 
     def __init__(self, scopes: list[str] = []) -> None:
@@ -97,11 +106,11 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
                 raise HTTPException(status_code=401, detail="Expired Keycloak token")
             raise HTTPException(status_code=401, detail="Invalid Keycloak token")
 
-        email = payload.get("email") or payload.get("preferred_username")
+        email = payload.get("email")
         if not email:
             raise HTTPException(
                 status_code=401,
-                detail="Keycloak token is missing preferred_username/email claim",
+                detail="Keycloak token is missing the email claim",
             )
 
         role = self._extract_role(payload)
@@ -146,7 +155,12 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
         if self.role_claim:
             value = payload.get(self.role_claim)
             if value:
-                return value if isinstance(value, str) else value[0]
+                if isinstance(value, str):
+                    return value
+                selected_role = self._select_best_role(value)
+                if selected_role:
+                    return selected_role
+                return value[0]
 
         # resource_access client roles
         client_roles = (
@@ -156,15 +170,16 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
         )
         # filter internal Keycloak roles
         client_roles = [r for r in client_roles if not r.startswith("uma_protection")]
-        if client_roles:
-            return self._map_role(client_roles[0])
+        selected_role = self._select_best_role(client_roles)
+        if selected_role:
+            return selected_role
 
         # realm roles
         realm_roles = payload.get("realm_access", {}).get("roles", [])
         realm_roles = [r for r in realm_roles if not r.startswith("uma_protection")]
-        keep_realm_roles = [r for r in realm_roles if r in (r2.value for r2 in Roles)]
-        if keep_realm_roles:
-            return self._map_role(keep_realm_roles[0])
+        selected_role = self._select_best_role(realm_roles)
+        if selected_role:
+            return selected_role
 
         # custom keep_role claim (legacy)
         keep_role = payload.get("keep_role")
@@ -177,14 +192,27 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
         return _DEFAULT_ROLE
 
     @staticmethod
-    def _map_role(raw: str) -> str:
-        """Normalise a raw role string to a known Keep role name."""
+    def _normalize_role(raw: str) -> str | None:
+        """Return a known Keep role name, or None for non-Keep roles."""
         raw_lower = raw.lower()
         for role in Roles:
             if role.value == raw_lower:
                 return role.value
-        # Unknown – default to noc so the user gets read-only access
-        return _DEFAULT_ROLE
+
+        return None
+
+    def _select_best_role(self, roles: list[str]) -> str | None:
+        """Pick the strongest recognized Keep role from a token role list."""
+        normalized_roles = {
+            normalized_role
+            for normalized_role in (self._normalize_role(role) for role in roles)
+            if normalized_role
+        }
+        for role_name in _ROLE_PRIORITY:
+            if role_name in normalized_roles:
+                return role_name
+
+        return None
 
     def _auto_provision_user(self, tenant_id: str, email: str, role: str) -> None:
         """Create the user in Keep's DB if they don't exist yet."""

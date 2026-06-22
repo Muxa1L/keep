@@ -50,7 +50,7 @@ def _make_keycloak_payload(
         "aud": client_id,
         "exp": int(time.time()) + exp_offset,
         "iat": int(time.time()),
-        "preferred_username": email,
+        "email": email,
         "resource_access": {
             client_id: {"roles": [role]},
         },
@@ -126,6 +126,22 @@ class TestExtractRole:
         payload = {"resource_access": {"keep": {"roles": ["superuser"]}}}
         assert verifier._extract_role(payload) == "noc"
 
+    def test_admin_role_selected_even_if_not_first_client_role(self, verifier_env):
+        verifier = _make_verifier()
+        payload = {
+            "resource_access": {
+                "keep": {"roles": ["account_view", "admin", "uma_protection"]}
+            }
+        }
+        assert verifier._extract_role(payload) == "admin"
+
+    def test_admin_role_selected_even_if_not_first_realm_role(self, verifier_env):
+        verifier = _make_verifier()
+        payload = {
+            "realm_access": {"roles": ["offline_access", "admin", "default-roles-keep"]}
+        }
+        assert verifier._extract_role(payload) == "admin"
+
 
 class TestVerifyBearerToken:
     """Unit-test _verify_bearer_token with mocked KeycloakOpenID.decode_token."""
@@ -175,9 +191,9 @@ class TestVerifyBearerToken:
         from keep.api.core.db import get_users
 
         email = "defaultrole@auto.com"
-        # Token with no role information
+        # Token with no role information but a valid email
         payload = {
-            "preferred_username": email,
+            "email": email,
             "iat": int(time.time()),
             "exp": int(time.time()) + 3600,
         }

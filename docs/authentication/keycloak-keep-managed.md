@@ -10,7 +10,7 @@ This document covers the `keycloak_keep_managed` authentication provider — a l
 | Authorization | Keycloak UMA / policies | Keep RBAC |
 | Admin API required | Yes | **No** |
 | User management | Keycloak admin | Keep database |
-| Auto-create unknown users | No | **Yes** (role: `noc`) |
+| Auto-create unknown users | No | **Yes** (token role, default `noc`) |
 
 ## When to use this provider
 
@@ -35,6 +35,8 @@ Choose `keycloak_keep_managed` when:
 | `KEYCLOAK_VERIFY_CERT` | No | Verify TLS certificate (default: `true`) | `false` |
 | `KEYCLOAK_ROLE_CLAIM` | No | Custom JWT claim that carries the Keep role directly | `keep_role` |
 
+> **Important:** Keep uses the `email` claim as the user identifier. Tokens that do not contain an `email` claim are rejected with HTTP 401. Make sure the Keycloak client has an **Email** protocol mapper enabled.
+
 ### Frontend
 
 The frontend configuration is identical to the standard Keycloak provider. Set `AUTH_TYPE=KEYCLOAK` in the UI environment.
@@ -58,8 +60,9 @@ The provider resolves the Keep role from the JWT in the following priority order
 4. **`keep_role` claim** — legacy custom protocol mapper.
 5. **Default** — `noc` (read-only access).
 
-Valid role values are `admin`, `noc`, `webhook`, and `workflowrunner`.  
-Unknown role strings are silently normalised to `noc`.
+Valid role values are `admin`, `noc`, `webhook`, and `workflowrunner`.
+
+Unknown role strings from `resource_access` and `realm_access` are silently normalised to `noc`. The `keep_role` claim and the custom `KEYCLOAK_ROLE_CLAIM` are returned verbatim — if the value is not a recognised Keep role, the request is rejected with HTTP 403.
 
 ### Recommended Keycloak setup (client roles)
 
@@ -74,8 +77,8 @@ No further Keycloak configuration is needed. Keep does not need a service accoun
 
 On every successful token validation the provider:
 
-1. Checks whether the user (identified by `preferred_username`) already exists in Keep's database.
-2. If not, creates the user with the role extracted from the token (default `noc`).
+1. Checks whether the user (identified by the `email` claim) already exists in Keep's database.
+2. If not, creates the user with the role extracted from the token (default `noc` when no role information is present in the token).
 3. Updates the user's `last_sign_in` timestamp.
 
 This means any valid Keycloak user will be onboarded automatically on their first login without any manual intervention.
