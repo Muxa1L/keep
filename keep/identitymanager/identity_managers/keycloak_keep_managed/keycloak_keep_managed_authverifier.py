@@ -97,7 +97,7 @@ class KeycloakKeepManagedAuthVerifier(AuthVerifierBase):
                 raise HTTPException(status_code=401, detail="Expired Keycloak token")
             raise HTTPException(status_code=401, detail="Invalid Keycloak token")
 
-        email = payload.get("preferred_username") or payload.get("email")
+        email = payload.get("email") or payload.get("preferred_username")
         if not email:
             raise HTTPException(
                 status_code=401,
