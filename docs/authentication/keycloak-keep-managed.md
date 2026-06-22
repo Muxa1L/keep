@@ -85,7 +85,22 @@ This means any valid Keycloak user will be onboarded automatically on their firs
 
 ## User management
 
-Because authorization is keep-managed, users can be listed, created, and deleted through Keep's standard **Settings → Users** UI and via the `/settings/users` API endpoints. Changes made there are stored in Keep's database; Keycloak is not modified.
+Because authorization is keep-managed, users can be listed, created, updated, and deleted through Keep's standard **Settings → Users** UI and via the `/auth/users` API endpoints. Changes made there are stored in Keep's database; Keycloak is not modified.
+
+Custom roles are also keep-managed. Their definitions are stored in the tenant configuration JSON under `custom_roles`, not in Keycloak. Once created, those roles can be assigned to users from the Keep UI or through the `/auth/roles` and `/auth/users` API endpoints.
+
+Example tenant configuration fragment:
+
+```json
+{
+  "custom_roles": {
+    "operator": {
+      "description": "Operator role",
+      "scopes": ["read:settings", "write:settings"]
+    }
+  }
+}
+```
 
 ## docker-compose example
 

@@ -17,6 +17,8 @@ import enum
 
 from fastapi import HTTPException
 
+from keep.api.core.dependencies import SINGLE_TENANT_UUID
+
 
 class Roles(enum.Enum):
     ADMIN = "admin"
@@ -76,7 +78,7 @@ class WorkflowRunner(Role):
     DESCRIPTION = "Run workflows using API keys"
 
 
-def get_role_by_role_name(role_name: str) -> list[str]:
+def _get_builtin_role_by_role_name(role_name: str):
     if role_name == Roles.ADMIN.value:
         return Admin
     elif role_name == Roles.NOC.value:
@@ -85,8 +87,48 @@ def get_role_by_role_name(role_name: str) -> list[str]:
         return Webhook
     elif role_name == Roles.WORKFLOW_RUNNER.value:
         return WorkflowRunner
-    else:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Role {role_name} not found",
-        )
+
+    return None
+
+
+def _build_custom_role(role_name: str, role_definition: dict):
+    return type(
+        f"CustomRole_{role_name}",
+        (Role,),
+        {
+            "SCOPES": list(role_definition.get("scopes", [])),
+            "DESCRIPTION": role_definition.get("description") or role_name,
+        },
+    )
+
+
+def _get_custom_role_by_role_name(role_name: str, tenant_id: str = SINGLE_TENANT_UUID):
+    from keep.api.core.db import get_tenant_config
+
+    tenant_config = get_tenant_config(tenant_id) or {}
+    custom_roles = tenant_config.get("custom_roles", {})
+    if not isinstance(custom_roles, dict):
+        return None
+
+    role_definition = custom_roles.get(role_name)
+    if not role_definition:
+        return None
+
+    return _build_custom_role(role_name, role_definition)
+
+
+def get_role_by_role_name(role_name: str, tenant_id: str = SINGLE_TENANT_UUID):
+    role_name = role_name.lower()
+
+    builtin_role = _get_builtin_role_by_role_name(role_name)
+    if builtin_role:
+        return builtin_role
+
+    custom_role = _get_custom_role_by_role_name(role_name, tenant_id=tenant_id)
+    if custom_role:
+        return custom_role
+
+    raise HTTPException(
+        status_code=403,
+        detail=f"Role {role_name} not found",
+    )

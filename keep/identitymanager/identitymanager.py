@@ -3,6 +3,9 @@ import importlib
 import inspect
 import logging
 
+from fastapi import HTTPException
+
+from keep.api.core.db import get_tenant_config, write_tenant_config
 from keep.api.models.user import ResourcePermission, Role, User
 from keep.contextmanager.contextmanager import ContextManager
 from keep.identitymanager.authenticatedentity import AuthenticatedEntity
@@ -29,9 +32,39 @@ for name, obj in inspect.getmembers(rbac_module):
 
 
 class BaseIdentityManager(metaclass=abc.ABCMeta):
+    CUSTOM_ROLES_CONFIG_KEY = "custom_roles"
+
     def __init__(self, tenant_id, context_manager: ContextManager = None, **kwargs):
         self.tenant_id = tenant_id
         self.logger = logging.getLogger(__name__)
+
+    def _get_custom_roles_config(self) -> dict[str, dict]:
+        tenant_config = get_tenant_config(self.tenant_id) or {}
+        custom_roles = tenant_config.get(self.CUSTOM_ROLES_CONFIG_KEY, {})
+        return custom_roles if isinstance(custom_roles, dict) else {}
+
+    def _write_custom_roles_config(self, custom_roles: dict[str, dict]) -> None:
+        tenant_config = get_tenant_config(self.tenant_id) or {}
+        tenant_config[self.CUSTOM_ROLES_CONFIG_KEY] = custom_roles
+        write_tenant_config(self.tenant_id, tenant_config)
+
+    def _normalize_role_name(self, role_name: str | None) -> str:
+        return (role_name or "").strip().lower()
+
+    def _normalize_role_scopes(self, scopes) -> list[str]:
+        normalized_scopes = sorted({scope.strip() for scope in (scopes or []) if scope})
+        if not normalized_scopes:
+            raise HTTPException(status_code=400, detail="Role must have at least one scope")
+        return normalized_scopes
+
+    def _custom_role_to_dto(self, role_name: str, role_definition: dict) -> Role:
+        return Role(
+            id=role_name,
+            name=role_name,
+            description=role_definition.get("description") or role_name,
+            scopes=set(role_definition.get("scopes", [])),
+            predefined=False,
+        )
 
     def on_start(self, app) -> None:
         """
@@ -260,6 +293,11 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
                     scopes=expanded_scopes,
                 )
             )
+
+        custom_roles = self._get_custom_roles_config()
+        for role_name, role_definition in sorted(custom_roles.items()):
+            roles_dto.append(self._custom_role_to_dto(role_name, role_definition))
+
         return roles_dto
 
     def get_role_by_role_name(self, role_name: str) -> Role:
@@ -272,10 +310,18 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
         Returns:
             Role: The role object.
         """
-        _role = get_role_by_role_name(role_name)
+        normalized_role_name = self._normalize_role_name(role_name)
+
+        custom_roles = self._get_custom_roles_config()
+        if normalized_role_name in custom_roles:
+            return self._custom_role_to_dto(
+                normalized_role_name, custom_roles[normalized_role_name]
+            )
+
+        _role = get_role_by_role_name(normalized_role_name, tenant_id=self.tenant_id)
         return Role(
-            id=role_name,
-            name=role_name,
+            id=normalized_role_name,
+            name=normalized_role_name,
             description=_role.DESCRIPTION,
             scopes=_role.SCOPES,
         )
@@ -292,5 +338,69 @@ class BaseIdentityManager(metaclass=abc.ABCMeta):
             role (Role): A role object, containing the
                                 resource, scope, and user or group information.
         """
-        # default implementation does not support creating roles
-        return role
+        role_name = self._normalize_role_name(role.name)
+        if not role_name:
+            raise HTTPException(status_code=400, detail="Role name is required")
+
+        if any(predefined_role.name == role_name for predefined_role in PREDEFINED_ROLES):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Role {role_name} is a predefined role and cannot be redefined",
+            )
+
+        custom_roles = self._get_custom_roles_config()
+        if role_name in custom_roles:
+            raise HTTPException(status_code=409, detail=f"Role {role_name} already exists")
+
+        custom_roles[role_name] = {
+            "description": role.description or role_name,
+            "scopes": self._normalize_role_scopes(role.scopes),
+        }
+        self._write_custom_roles_config(custom_roles)
+        return self._custom_role_to_dto(role_name, custom_roles[role_name])
+
+    def update_role(self, role_id: str, role: Role) -> Role:
+        normalized_role_id = self._normalize_role_name(role_id)
+        custom_roles = self._get_custom_roles_config()
+        existing_role = custom_roles.get(normalized_role_id)
+        if not existing_role:
+            raise HTTPException(status_code=404, detail=f"Role {role_id} not found")
+
+        new_role_name = self._normalize_role_name(role.name) or normalized_role_id
+        if (
+            new_role_name != normalized_role_id
+            and any(predefined_role.name == new_role_name for predefined_role in PREDEFINED_ROLES)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Role {new_role_name} is a predefined role and cannot be redefined",
+            )
+        if new_role_name != normalized_role_id and new_role_name in custom_roles:
+            raise HTTPException(status_code=409, detail=f"Role {new_role_name} already exists")
+
+        updated_role = {
+            "description": (
+                role.description
+                if role.description is not None
+                else existing_role.get("description") or normalized_role_id
+            ),
+            "scopes": (
+                self._normalize_role_scopes(role.scopes)
+                if role.scopes is not None
+                else list(existing_role.get("scopes", []))
+            ),
+        }
+        if new_role_name != normalized_role_id:
+            del custom_roles[normalized_role_id]
+        custom_roles[new_role_name] = updated_role
+        self._write_custom_roles_config(custom_roles)
+        return self._custom_role_to_dto(new_role_name, updated_role)
+
+    def delete_role(self, role_id: str) -> None:
+        normalized_role_id = self._normalize_role_name(role_id)
+        custom_roles = self._get_custom_roles_config()
+        if normalized_role_id not in custom_roles:
+            raise HTTPException(status_code=404, detail=f"Role {role_id} not found")
+
+        del custom_roles[normalized_role_id]
+        self._write_custom_roles_config(custom_roles)

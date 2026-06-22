@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from keep.api.core.db import create_user as create_user_in_db
 from keep.api.core.db import delete_user as delete_user_from_db
 from keep.api.core.db import get_users as get_users_from_db
+from keep.api.core.db import update_user as update_user_in_db
 from keep.api.models.user import User
 from keep.contextmanager.contextmanager import ContextManager
 from keep.identitymanager.identity_managers.keycloak_keep_managed.keycloak_keep_managed_authverifier import (
@@ -67,34 +68,25 @@ class KeycloakKeepManagedIdentityManager(BaseIdentityManager):
             raise HTTPException(status_code=404, detail="User not found")
 
     def update_user(self, user_email: str, update_data: dict) -> User:
-        raise NotImplementedError("KeycloakKeepManagedIdentityManager.update_user")
+        user = update_user_in_db(self.tenant_id, user_email, update_data)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return User(
+            email=user.username,
+            name=user.username,
+            role=user.role,
+            last_login=str(user.last_sign_in) if user.last_sign_in else None,
+            created_at=str(user.created_at),
+        )
 
     def create_role(self, role):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Custom role creation is not supported for AUTH_TYPE=keycloak_keep_managed. "
-                "This auth mode only supports the built-in Keep roles: admin, noc, webhook, workflowrunner."
-            ),
-        )
+        return super().create_role(role)
 
     def update_role(self, role_id: str, role):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Custom role updates are not supported for AUTH_TYPE=keycloak_keep_managed. "
-                "This auth mode only supports the built-in Keep roles."
-            ),
-        )
+        return super().update_role(role_id, role)
 
     def delete_role(self, role_id: str) -> None:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Custom role deletion is not supported for AUTH_TYPE=keycloak_keep_managed. "
-                "This auth mode only supports the built-in Keep roles."
-            ),
-        )
+        return super().delete_role(role_id)
 
     def get_auth_verifier(self, scopes: list) -> KeycloakKeepManagedAuthVerifier:
         return KeycloakKeepManagedAuthVerifier(scopes)

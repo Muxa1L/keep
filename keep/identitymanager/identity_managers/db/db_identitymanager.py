@@ -8,6 +8,7 @@ from keep.api.core.db import create_user as create_user_in_db
 from keep.api.core.db import delete_user as delete_user_from_db
 from keep.api.core.db import get_user
 from keep.api.core.db import get_users as get_users_from_db
+from keep.api.core.db import update_user as update_user_in_db
 from keep.api.core.dependencies import SINGLE_TENANT_UUID
 from keep.api.models.user import User
 from keep.contextmanager.contextmanager import ContextManager
@@ -110,4 +111,13 @@ class DbIdentityManager(BaseIdentityManager):
         return DbAuthVerifier(scopes)
 
     def update_user(self, user_email: str, update_data: dict) -> User:
-        raise NotImplementedError("DbIdentityManager.update_user")
+        user = update_user_in_db(self.tenant_id, user_email, update_data)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return User(
+            email=user.username,
+            name=user.username,
+            role=user.role,
+            last_login=str(user.last_sign_in) if user.last_sign_in else None,
+            created_at=str(user.created_at),
+        )
