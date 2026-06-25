@@ -65,6 +65,7 @@ def on_starting(server=None):
         IdentityManagerTypes.ONELOGIN.value,
         IdentityManagerTypes.KEYCLOAK.value,
         IdentityManagerTypes.OKTA.value,
+        IdentityManagerTypes.KEYCLOAK_KEEP_MANAGED.value,
         "no_auth",  # backwards compatibility
         "single_tenant",  # backwards compatibility
     ]:
@@ -73,6 +74,7 @@ def on_starting(server=None):
             IdentityManagerTypes.ONELOGIN.value,
             IdentityManagerTypes.KEYCLOAK.value,
             IdentityManagerTypes.OKTA.value,
+            IdentityManagerTypes.KEYCLOAK_KEEP_MANAGED.value,
         ]
         # for oauth2proxy, we don't want to create the default user
         try_create_single_tenant(
