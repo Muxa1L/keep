@@ -46,7 +46,7 @@ from sqlalchemy.sql.functions import count
 from sqlmodel import Session, SQLModel, col, or_, select, text
 from sqlalchemy.orm.attributes import flag_modified
 
-from keep.api.consts import STATIC_PRESETS
+from keep.api.consts import REDIS, STATIC_PRESETS
 from keep.api.core.config import config
 from keep.api.core.db_utils import (
     create_db_engine,
@@ -106,6 +106,26 @@ KEEP_AUDIT_EVENTS_ENABLED = config("KEEP_AUDIT_EVENTS_ENABLED", cast=bool, defau
 
 INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT = timedelta(minutes=60)
 WORKFLOWS_TIMEOUT = timedelta(minutes=120)
+
+
+def _workflow_advisory_lock_key(workflow_id) -> int:
+    """Derive a stable 64-bit int key from workflow_id for Postgres advisory locks."""
+    h = hashlib.md5(str(workflow_id).encode("utf-8")).hexdigest()
+    return int(h[:15], 16)  # 60 bits, well within Postgres bigint range
+
+
+def _pg_advisory_xact_lock(session: Session, workflow_id):
+    """Acquire a transaction-scoped Postgres advisory lock for a workflow.
+
+    No-op on non-Postgres dialects. The lock is released automatically when the
+    surrounding transaction commits or rolls back.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"),
+        {"key": _workflow_advisory_lock_key(workflow_id)},
+    )
 
 
 def dispose_session():
@@ -316,10 +336,9 @@ def get_timeouted_workflow_exections():
         return timeouted_workflows
 
 
-def get_workflows_that_should_run():
+def get_workflows_with_interval() -> list:
+    """Return all non-deleted, non-disabled workflows with a positive interval."""
     with Session(engine) as session:
-        logger.debug("Checking for workflows that should run")
-        workflows_with_interval = []
         try:
             result = session.exec(
                 select(Workflow)
@@ -328,121 +347,163 @@ def get_workflows_that_should_run():
                 .filter(Workflow.interval != None)
                 .filter(Workflow.interval > 0)
             )
-            workflows_with_interval = result.all() if result else []
+            return result.all() if result else []
         except Exception:
             logger.exception("Failed to get workflows with interval")
+            return []
 
-        logger.debug(f"Found {len(workflows_with_interval)} workflows with interval")
-        workflows_to_run = []
-        # for each workflow:
-        for workflow in workflows_with_interval:
-            current_time = datetime.utcnow()
-            last_execution = get_last_completed_execution(session, workflow.id)
-            # if there no last execution, that's the first time we run the workflow
-            if not last_execution:
-                try:
-                    # try to get the lock
-                    workflow_execution_id = create_workflow_execution(
-                        workflow.id, workflow.revision, workflow.tenant_id, "scheduler"
-                    )
-                    # we succeed to get the lock on this execution number :)
-                    # let's run it
-                    workflows_to_run.append(
-                        {
-                            "tenant_id": workflow.tenant_id,
-                            "workflow_id": workflow.id,
-                            "workflow_execution_id": workflow_execution_id,
-                        }
-                    )
-                # some other thread/instance has already started to work on it
-                except IntegrityError:
-                    continue
-            # else, if the last execution was more than interval seconds ago, we need to run it
+
+def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
+    """Decide whether a single interval workflow should run and create its execution if so.
+
+    Returns a dict ``{tenant_id, workflow_id, workflow_execution_id}`` if the
+    workflow should run now, or ``None`` if it is not due, already running, or
+    the execution number is locked by another instance (IntegrityError).
+
+    HA coordination: when Redis is not enabled, a per-workflow Postgres
+    transaction-scoped advisory lock is acquired so only one instance at a
+    time can make this decision for a given workflow. When Redis is enabled,
+    the caller (WorkflowScheduler) is responsible for acquiring a per-workflow
+    Redis lock around this call.
+    """
+    with Session(engine) as session:
+        workflow = session.exec(
+            select(Workflow)
+            .filter(Workflow.id == workflow_id)
+            .filter(Workflow.is_deleted == False)
+            .filter(Workflow.is_disabled == False)
+            .filter(Workflow.interval != None)
+            .filter(Workflow.interval > 0)
+        ).first()
+        if not workflow:
+            return None
+
+        # Postgres advisory lock: serializes the decision for this workflow
+        # across instances when Redis is not available. Transaction-scoped, so
+        # it auto-releases when this function returns.
+        if not REDIS:
+            _pg_advisory_xact_lock(session, workflow.id)
+
+        current_time = datetime.utcnow()
+        last_execution = get_last_completed_execution(session, workflow.id)
+        # if there no last execution, that's the first time we run the workflow
+        if not last_execution:
+            try:
+                # try to get the lock
+                workflow_execution_id = create_workflow_execution(
+                    workflow.id, workflow.revision, workflow.tenant_id, "scheduler"
+                )
+                # we succeed to get the lock on this execution number :)
+                # let's run it
+                return {
+                    "tenant_id": workflow.tenant_id,
+                    "workflow_id": workflow.id,
+                    "workflow_execution_id": workflow_execution_id,
+                }
+            # some other thread/instance has already started to work on it
+            except IntegrityError:
+                return None
+        # else, if the last execution was more than interval seconds ago, we need to run it
+        elif (
+            last_execution.started + timedelta(seconds=workflow.interval)
+            <= current_time
+        ):
+            try:
+                # try to get the lock with execution_number + 1
+                workflow_execution_id = create_workflow_execution(
+                    workflow.id,
+                    workflow.revision,
+                    workflow.tenant_id,
+                    "scheduler",
+                    last_execution.execution_number + 1,
+                )
+                # we succeed to get the lock on this execution number :)
+                # let's run it
+                return {
+                    "tenant_id": workflow.tenant_id,
+                    "workflow_id": workflow.id,
+                    "workflow_execution_id": workflow_execution_id,
+                }
+            # some other thread/instance has already started to work on it
+            except IntegrityError:
+                # we need to verify the locking is still valid and not timeouted
+                session.rollback()
+                pass
+            # get the ongoing execution
+            ongoing_execution = session.exec(
+                select(WorkflowExecution)
+                .where(WorkflowExecution.workflow_id == workflow.id)
+                .where(
+                    WorkflowExecution.execution_number
+                    == last_execution.execution_number + 1
+                )
+                .limit(1)
+            ).first()
+            # this is a WTF exception since if this (workflow_id, execution_number) does not exist,
+            # we would be able to acquire the lock
+            if not ongoing_execution:
+                logger.error(
+                    f"WTF: ongoing execution not found {workflow.id} {last_execution.execution_number + 1}"
+                )
+                return None
+            # if this completed, error, than that's ok - the service who locked the execution is done
+            elif ongoing_execution.status != "in_progress":
+                return None
+            # if the ongoing execution runs more than timeout minutes, relaunch it
             elif (
-                last_execution.started + timedelta(seconds=workflow.interval)
+                ongoing_execution.started + INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
                 <= current_time
             ):
+                ongoing_execution.status = "timeout"
+                session.commit()
+                # re-create the execution and try to get the lock
                 try:
-                    # try to get the lock with execution_number + 1
                     workflow_execution_id = create_workflow_execution(
                         workflow.id,
                         workflow.revision,
                         workflow.tenant_id,
                         "scheduler",
-                        last_execution.execution_number + 1,
+                        ongoing_execution.execution_number + 1,
                     )
-                    # we succeed to get the lock on this execution number :)
-                    # let's run it
-                    workflows_to_run.append(
-                        {
-                            "tenant_id": workflow.tenant_id,
-                            "workflow_id": workflow.id,
-                            "workflow_execution_id": workflow_execution_id,
-                        }
-                    )
-                    # continue to the next one
-                    continue
-                # some other thread/instance has already started to work on it
+                # some other thread/instance has already started to work on it and that's ok
                 except IntegrityError:
-                    # we need to verify the locking is still valid and not timeouted
-                    session.rollback()
-                    pass
-                # get the ongoing execution
-                ongoing_execution = session.exec(
-                    select(WorkflowExecution)
-                    .where(WorkflowExecution.workflow_id == workflow.id)
-                    .where(
-                        WorkflowExecution.execution_number
-                        == last_execution.execution_number + 1
+                    logger.debug(
+                        f"Failed to create a new execution for workflow {workflow.id} [timeout]. Constraint is met."
                     )
-                    .limit(1)
-                ).first()
-                # this is a WTF exception since if this (workflow_id, execution_number) does not exist,
-                # we would be able to acquire the lock
-                if not ongoing_execution:
-                    logger.error(
-                        f"WTF: ongoing execution not found {workflow.id} {last_execution.execution_number + 1}"
-                    )
-                    continue
-                # if this completed, error, than that's ok - the service who locked the execution is done
-                elif ongoing_execution.status != "in_progress":
-                    continue
-                # if the ongoing execution runs more than timeout minutes, relaunch it
-                elif (
-                    ongoing_execution.started + INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
-                    <= current_time
-                ):
-                    ongoing_execution.status = "timeout"
-                    session.commit()
-                    # re-create the execution and try to get the lock
-                    try:
-                        workflow_execution_id = create_workflow_execution(
-                            workflow.id,
-                            workflow.revision,
-                            workflow.tenant_id,
-                            "scheduler",
-                            ongoing_execution.execution_number + 1,
-                        )
-                    # some other thread/instance has already started to work on it and that's ok
-                    except IntegrityError:
-                        logger.debug(
-                            f"Failed to create a new execution for workflow {workflow.id} [timeout]. Constraint is met."
-                        )
-                        continue
-                    # managed to acquire the (workflow_id, execution_number) lock
-                    workflows_to_run.append(
-                        {
-                            "tenant_id": workflow.tenant_id,
-                            "workflow_id": workflow.id,
-                            "workflow_execution_id": workflow_execution_id,
-                        }
-                    )
+                    return None
+                # managed to acquire the (workflow_id, execution_number) lock
+                return {
+                    "tenant_id": workflow.tenant_id,
+                    "workflow_id": workflow.id,
+                    "workflow_execution_id": workflow_execution_id,
+                }
+            # else: the ongoing execution is in progress and not timed out.
             else:
                 logger.debug(
                     f"Workflow {workflow.id} is already running by someone else"
                 )
+                return None
+        else:
+            logger.debug(
+                f"Workflow {workflow.id} is already running by someone else"
+            )
+            return None
 
-        return workflows_to_run
+
+def get_workflows_that_should_run():
+    """Return all interval workflows that should run now.
+
+    Thin wrapper over :func:`get_workflows_with_interval` +
+    :func:`get_workflow_that_should_run` kept for backwards compatibility. The
+    WorkflowScheduler calls the per-workflow functions directly so it can wrap
+    them with Redis-based HA locking.
+    """
+    workflows_to_run = []
+    for workflow in get_workflows_with_interval():
+        result = get_workflow_that_should_run(workflow.id)
+        if result is not None:
+            workflows_to_run.append(result)
+    return workflows_to_run
 
 
 def update_workflow_by_id(

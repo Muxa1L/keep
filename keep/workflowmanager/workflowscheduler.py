@@ -9,7 +9,7 @@ from threading import Lock
 
 from sqlalchemy.exc import IntegrityError
 
-from keep.api.consts import RUNNING_IN_CLOUD_RUN
+from keep.api.consts import REDIS, RUNNING_IN_CLOUD_RUN
 from keep.api.core.config import config
 from keep.api.core.db import create_workflow_execution
 from keep.api.core.db import finish_workflow_execution as finish_workflow_execution_db
@@ -19,7 +19,11 @@ from keep.api.core.db import (
     get_timeouted_workflow_exections,
 )
 from keep.api.core.db import get_workflow_by_id as get_workflow_db
-from keep.api.core.db import get_workflows_that_should_run
+from keep.api.core.db import (
+    get_workflow_that_should_run,
+    get_workflows_with_interval,
+)
+from keep.api.core.db import INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
 from keep.api.core.metrics import (
     workflow_execution_errors_total,
     workflow_execution_status,
@@ -36,6 +40,76 @@ from keep.workflowmanager.workflowstore import WorkflowStore
 
 READ_ONLY_MODE = config("KEEP_READ_ONLY", default="false") == "true"
 MAX_WORKERS = config("WORKFLOWS_MAX_WORKERS", default="20")
+
+# HA: TTL for the Redis-based workflow scheduling lock. Matches the relaunch
+# timeout so that a crashed scheduler's lock auto-expires around the same time
+# the relaunch logic would have kicked in anyway.
+WORKFLOW_SCHEDULING_LOCK_TTL = config(
+    "KEEP_WORKFLOW_SCHEDULING_LOCK_TTL",
+    cast=int,
+    default=int(INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT.total_seconds()),
+)
+
+_workflow_scheduling_redis = None
+
+
+def _get_workflow_scheduling_redis():
+    """Lazy-init a sync Redis client used to coordinate workflow scheduling in HA."""
+    global _workflow_scheduling_redis
+    if _workflow_scheduling_redis is not None:
+        return _workflow_scheduling_redis
+    import redis as redis_lib
+
+    _workflow_scheduling_redis = redis_lib.Redis(
+        host=config("REDIS_HOST", default="localhost"),
+        port=config("REDIS_PORT", cast=int, default=6379),
+        username=config("REDIS_USERNAME", default=None),
+        password=config("REDIS_PASSWORD", default=None),
+        ssl=config("REDIS_SSL", cast=bool, default=False),
+        socket_timeout=5,
+        socket_connect_timeout=5,
+        decode_responses=True,
+    )
+    return _workflow_scheduling_redis
+
+
+def _workflow_scheduling_lock_key(workflow_id) -> str:
+    return f"lock:workflow:scheduling:{workflow_id}"
+
+
+def _try_acquire_workflow_scheduling_lock(workflow_id) -> bool:
+    """Try to acquire a Redis distributed lock for scheduling a workflow.
+
+    Returns True if acquired, False if held by another instance. Fails open
+    (returns True) if Redis is unreachable so that scheduling continues and
+    relies on the DB unique constraint for deduplication.
+    """
+    try:
+        client = _get_workflow_scheduling_redis()
+        return bool(
+            client.set(
+                _workflow_scheduling_lock_key(workflow_id),
+                "1",
+                nx=True,
+                ex=WORKFLOW_SCHEDULING_LOCK_TTL,
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to acquire workflow scheduling lock from Redis"
+        )
+        return True
+
+
+def _release_workflow_scheduling_lock(workflow_id):
+    """Best-effort release of the Redis workflow scheduling lock."""
+    try:
+        client = _get_workflow_scheduling_redis()
+        client.delete(_workflow_scheduling_lock_key(workflow_id))
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to release workflow scheduling lock from Redis"
+        )
 
 
 class WorkflowStatus(enum.Enum):
@@ -113,25 +187,58 @@ class WorkflowScheduler:
         self.logger.info("Workflows scheduler started")
 
     def _handle_interval_workflows(self):
-        workflows = []
-
         if not self.interval_enabled:
             self.logger.debug("Interval workflows are disabled")
             return
 
         try:
-            # get all workflows that should run due to interval
-            workflows = get_workflows_that_should_run()
+            workflows_with_interval = get_workflows_with_interval()
         except Exception as ex:
             self.logger.warning(
-                "Error getting workflows that should run",
+                "Error getting workflows with interval",
                 exc_info=ex,
             )
-            pass
-        for workflow in workflows:
-            workflow_execution_id = workflow.get("workflow_execution_id")
-            tenant_id = workflow.get("tenant_id")
-            workflow_id = workflow.get("workflow_id")
+            return
+
+        for workflow in workflows_with_interval:
+            workflow_id = workflow.id
+            tenant_id = workflow.tenant_id
+
+            # HA coordination (Redis path): acquire a per-workflow lock before
+            # making the scheduling decision. The lock is held until the
+            # execution finishes (released in _finish_workflow_execution) and
+            # has a TTL safety net in case the holder crashes. If another
+            # instance holds it, skip this workflow entirely.
+            #
+            # When Redis is not enabled, the per-workflow Postgres advisory
+            # lock inside get_workflow_that_should_run serializes the decision.
+            if REDIS:
+                if not _try_acquire_workflow_scheduling_lock(workflow_id):
+                    self.logger.debug(
+                        f"Workflow {workflow_id} is locked by another instance, skipping"
+                    )
+                    continue
+
+            try:
+                workflow_to_run = get_workflow_that_should_run(workflow_id)
+            except Exception as ex:
+                if REDIS:
+                    _release_workflow_scheduling_lock(workflow_id)
+                self.logger.warning(
+                    f"Error deciding whether workflow {workflow_id} should run",
+                    exc_info=ex,
+                )
+                continue
+
+            # None means: not due, already running, or another instance won the
+            # execution-number race. Release the Redis lock so the next tick can
+            # re-evaluate; nothing was scheduled.
+            if workflow_to_run is None:
+                if REDIS:
+                    _release_workflow_scheduling_lock(workflow_id)
+                continue
+
+            workflow_execution_id = workflow_to_run.get("workflow_execution_id")
 
             try:
                 workflow_obj = self.workflow_store.get_workflow(tenant_id, workflow_id)
@@ -171,6 +278,8 @@ class WorkflowScheduler:
                 )
                 continue
 
+            # Lock stays held here; it is released when the execution finishes
+            # via _finish_workflow_execution.
             future = self.executor.submit(
                 self._run_workflow,
                 tenant_id,
@@ -723,6 +832,12 @@ class WorkflowScheduler:
             status=status.value,
             error=error,
         )
+
+        # Release the Redis scheduling lock so the next interval cycle can run.
+        # Only interval-triggered workflows acquired the lock; for event/manual
+        # executions no lock was held and this is a harmless no-op.
+        if REDIS:
+            _release_workflow_scheduling_lock(workflow_id)
 
         if KEEP_EMAILS_ENABLED:
             # get the previous workflow execution id
