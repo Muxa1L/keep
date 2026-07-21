@@ -353,6 +353,43 @@ def get_workflows_with_interval() -> list:
             return []
 
 
+def is_workflow_due(workflow_id) -> bool:
+    """Cheap, lock-free, read-only check: might this interval workflow be due to run?
+
+    Returns True if the workflow exists, is enabled, has a positive interval, and
+    either has no completed execution yet (first run) or the last completed
+    execution started more than ``interval`` seconds ago. Returns False otherwise.
+
+    This is a best-effort filter to let the scheduler skip the Redis lock
+    round-trip in the common case where the workflow is clearly not due. It is
+    intentionally conservative: a True result does not guarantee the workflow
+    will actually be scheduled -- the authoritative decision (including the
+    stuck-execution relaunch path) is made under the lock by
+    :func:`get_workflow_that_should_run`, which re-checks state and handles the
+    ``(workflow_id, execution_number)`` unique-constraint race. A False result,
+    however, is definitive: if the interval has not elapsed there is no path
+    that would schedule the workflow, so skipping it is safe.
+    """
+    with Session(engine) as session:
+        workflow = session.exec(
+            select(Workflow)
+            .filter(Workflow.id == workflow_id)
+            .filter(Workflow.is_deleted == False)
+            .filter(Workflow.is_disabled == False)
+            .filter(Workflow.interval != None)
+            .filter(Workflow.interval > 0)
+        ).first()
+        if not workflow:
+            return False
+        last_execution = get_last_completed_execution(session, workflow.id)
+        if not last_execution:
+            return True
+        return (
+            last_execution.started + timedelta(seconds=workflow.interval)
+            <= datetime.utcnow()
+        )
+
+
 def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
     """Decide whether a single interval workflow should run and create its execution if so.
 

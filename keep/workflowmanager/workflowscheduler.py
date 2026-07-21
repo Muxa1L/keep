@@ -22,6 +22,7 @@ from keep.api.core.db import get_workflow_by_id as get_workflow_db
 from keep.api.core.db import (
     get_workflow_that_should_run,
     get_workflows_with_interval,
+    is_workflow_due,
 )
 from keep.api.core.db import INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
 from keep.api.core.metrics import (
@@ -204,11 +205,28 @@ class WorkflowScheduler:
             workflow_id = workflow.id
             tenant_id = workflow.tenant_id
 
-            # HA coordination (Redis path): acquire a per-workflow lock before
-            # making the scheduling decision. The lock is held until the
-            # execution finishes (released in _finish_workflow_execution) and
-            # has a TTL safety net in case the holder crashes. If another
-            # instance holds it, skip this workflow entirely.
+            # Cheap, lock-free pre-check: skip the Redis round-trip (and the
+            # advisory-lock / execution-creation work in the data layer) for the
+            # common case where the interval hasn't elapsed. This is
+            # conservative -- a True result does not guarantee the workflow will
+            # be scheduled (the authoritative decision is made under the lock
+            # below), but a False result is definitive.
+            try:
+                if not is_workflow_due(workflow_id):
+                    continue
+            except Exception as ex:
+                self.logger.warning(
+                    f"Error checking whether workflow {workflow_id} is due",
+                    exc_info=ex,
+                )
+                continue
+
+            # HA coordination (Redis path): acquire a per-workflow lock only
+            # once the pre-check says the workflow might be due. The lock is
+            # held until the execution finishes (released in
+            # _finish_workflow_execution) and has a TTL safety net in case the
+            # holder crashes. If another instance holds it, skip this workflow
+            # entirely.
             #
             # When Redis is not enabled, the per-workflow Postgres advisory
             # lock inside get_workflow_that_should_run serializes the decision.
