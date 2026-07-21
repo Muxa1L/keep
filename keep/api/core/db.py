@@ -402,6 +402,13 @@ def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
     time can make this decision for a given workflow. When Redis is enabled,
     the caller (WorkflowScheduler) is responsible for acquiring a per-workflow
     Redis lock around this call.
+
+    Deduplication: the (workflow_id, execution_number, is_running, timeslot)
+    unique constraint has a 2-minute ``timeslot`` bucket, so a duplicate
+    insert in a different timeslot would NOT raise IntegrityError. To close
+    that hole, an existing in-progress execution with the target number is
+    looked up explicitly before any insert is attempted; the advisory / Redis
+    lock serializes that check-and-insert across instances.
     """
     with Session(engine) as session:
         workflow = session.exec(
@@ -423,75 +430,60 @@ def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
 
         current_time = datetime.utcnow()
         last_execution = get_last_completed_execution(session, workflow.id)
-        # if there no last execution, that's the first time we run the workflow
-        if not last_execution:
-            try:
-                # try to get the lock
-                workflow_execution_id = create_workflow_execution(
-                    workflow.id, workflow.revision, workflow.tenant_id, "scheduler"
-                )
-                # we succeed to get the lock on this execution number :)
-                # let's run it
-                return {
-                    "tenant_id": workflow.tenant_id,
-                    "workflow_id": workflow.id,
-                    "workflow_execution_id": workflow_execution_id,
-                }
-            # some other thread/instance has already started to work on it
-            except IntegrityError:
-                return None
-        # else, if the last execution was more than interval seconds ago, we need to run it
-        elif (
-            last_execution.started + timedelta(seconds=workflow.interval)
-            <= current_time
-        ):
-            try:
-                # try to get the lock with execution_number + 1
-                workflow_execution_id = create_workflow_execution(
-                    workflow.id,
-                    workflow.revision,
-                    workflow.tenant_id,
-                    "scheduler",
-                    last_execution.execution_number + 1,
-                )
-                # we succeed to get the lock on this execution number :)
-                # let's run it
-                return {
-                    "tenant_id": workflow.tenant_id,
-                    "workflow_id": workflow.id,
-                    "workflow_execution_id": workflow_execution_id,
-                }
-            # some other thread/instance has already started to work on it
-            except IntegrityError:
-                # we need to verify the locking is still valid and not timeouted
-                session.rollback()
-                pass
-            # get the ongoing execution
-            ongoing_execution = session.exec(
-                select(WorkflowExecution)
-                .where(WorkflowExecution.workflow_id == workflow.id)
-                .where(
-                    WorkflowExecution.execution_number
-                    == last_execution.execution_number + 1
-                )
-                .limit(1)
-            ).first()
-            # this is a WTF exception since if this (workflow_id, execution_number) does not exist,
-            # we would be able to acquire the lock
-            if not ongoing_execution:
-                logger.error(
-                    f"WTF: ongoing execution not found {workflow.id} {last_execution.execution_number + 1}"
+
+        # Determine the execution_number we would create next.
+        # No last completed execution -> first run -> execution_number 1.
+        # Otherwise we only proceed if the interval has elapsed since the last
+        # completed execution; if it hasn't, the workflow is not due.
+        if last_execution:
+            if (
+                last_execution.started + timedelta(seconds=workflow.interval)
+                > current_time
+            ):
+                logger.debug(
+                    f"Workflow {workflow.id} is already running by someone else"
                 )
                 return None
-            # if this completed, error, than that's ok - the service who locked the execution is done
-            elif ongoing_execution.status != "in_progress":
+            target_execution_number = last_execution.execution_number + 1
+        else:
+            target_execution_number = 1
+
+        # Explicitly check for an existing execution with this number BEFORE
+        # attempting the insert.
+        #
+        # The (workflow_id, execution_number, is_running, timeslot) unique
+        # constraint includes a 2-minute ``timeslot`` bucket, so a duplicate
+        # insert for the same execution_number in a *different* timeslot does
+        # NOT raise IntegrityError. In HA, another instance may have already
+        # started this execution a couple of minutes ago -- it is still
+        # ``in_progress`` (and therefore not returned by
+        # get_last_completed_execution), and our insert would silently create
+        # a parallel execution with the same number. Querying for the existing
+        # row explicitly closes that hole for both the first-run and
+        # subsequent-run paths.
+        #
+        # The advisory lock (non-Redis path) or the Redis lock held by the
+        # caller for the whole execution serializes this check-and-insert
+        # across instances: once another instance commits its insert, our
+        # check (under the lock) sees the committed row.
+        existing_execution = session.exec(
+            select(WorkflowExecution)
+            .where(WorkflowExecution.workflow_id == workflow.id)
+            .where(WorkflowExecution.execution_number == target_execution_number)
+            .limit(1)
+        ).first()
+        if existing_execution:
+            # finished (success/error/timeout) -- the locking instance is done.
+            # Let the next tick re-evaluate; get_last_completed_execution will
+            # eventually reflect the new state.
+            if existing_execution.status != "in_progress":
                 return None
-            # if the ongoing execution runs more than timeout minutes, relaunch it
+            # if the ongoing execution runs more than timeout minutes, relaunch
             elif (
-                ongoing_execution.started + INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
+                existing_execution.started + INTERVAL_WORKFLOWS_RELAUNCH_TIMEOUT
                 <= current_time
             ):
-                ongoing_execution.status = "timeout"
+                existing_execution.status = "timeout"
                 session.commit()
                 # re-create the execution and try to get the lock
                 try:
@@ -500,9 +492,9 @@ def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
                         workflow.revision,
                         workflow.tenant_id,
                         "scheduler",
-                        ongoing_execution.execution_number + 1,
+                        existing_execution.execution_number + 1,
                     )
-                # some other thread/instance has already started to work on it and that's ok
+                # some other thread/instance has already started to work on it
                 except IntegrityError:
                     logger.debug(
                         f"Failed to create a new execution for workflow {workflow.id} [timeout]. Constraint is met."
@@ -514,15 +506,37 @@ def get_workflow_that_should_run(workflow_id) -> Optional[dict]:
                     "workflow_id": workflow.id,
                     "workflow_execution_id": workflow_execution_id,
                 }
-            # else: the ongoing execution is in progress and not timed out.
+            # else: in progress and not timed out -- someone else is running it
             else:
                 logger.debug(
                     f"Workflow {workflow.id} is already running by someone else"
                 )
                 return None
-        else:
+
+        # No existing execution for this number -- safe to create it.
+        try:
+            workflow_execution_id = create_workflow_execution(
+                workflow.id,
+                workflow.revision,
+                workflow.tenant_id,
+                "scheduler",
+                target_execution_number,
+            )
+            return {
+                "tenant_id": workflow.tenant_id,
+                "workflow_id": workflow.id,
+                "workflow_execution_id": workflow_execution_id,
+            }
+        except IntegrityError:
+            # Lost the race: another instance inserted between our check and
+            # our insert (the check-and-insert is serialized by the advisory /
+            # Redis lock, so this is rare). Roll back and let the next tick
+            # re-evaluate; it will find the now-in-progress execution via the
+            # check above.
+            session.rollback()
             logger.debug(
-                f"Workflow {workflow.id} is already running by someone else"
+                f"Failed to create execution for workflow {workflow.id} "
+                f"[execution_number={target_execution_number}]. Constraint is met."
             )
             return None
 
