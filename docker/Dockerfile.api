@@ -32,7 +32,34 @@ RUN apk add --no-cache \
     mysql-client \
     build-base \
     linux-headers \
-    git
+    git \
+    make curl  pkgconfig bsd-compat-headers zlib-dev cyrus-sasl-dev curl-dev \
+    zstd-dev yajl-dev python3-dev
+ENV LIBRDKAFKA_VERSION="v2.15.0"
+
+RUN \
+    echo Installing librdkafka && \
+    mkdir -p /usr/src/librdkafka && \
+    cd /usr/src/librdkafka && \
+    curl -LfsS https://github.com/edenhill/librdkafka/archive/${LIBRDKAFKA_VERSION}.tar.gz | \
+        tar xvzf - --strip-components=1 && \
+    ./configure --prefix=/usr --disable-lz4-ext && \
+    make -j && \
+    make install && \
+    cd / && \
+    rm -rf /usr/src/librdkafka
+
+# RUN \
+#     echo Installing confluent-kafka-python && \
+#     mkdir -p /usr/src/confluent-kafka-python && \
+#     cd /usr/src/confluent-kafka-python && \
+#     rm -rf build && \
+#     rm -rf dist && \
+#     python3 -m pip install build && \
+#     python3 -m build && \
+#     python3 -m pip install dist/confluent_kafka*whl && \
+#     cd / && \
+#     rm -rf /usr/src/confluent-kafka-python
 
 ENV PIP_DEFAULT_TIMEOUT=100 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -58,14 +85,26 @@ FROM base as final
 ENV PATH="/venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/venv"
 ENV EE_PATH="ee"
+RUN apk add --no-cache curl curl-dev zstd-dev yajl-dev cyrus-sasl-dev libffi-dev openssl-dev
+COPY --from=builder /usr/lib/librdkafka.* /usr/lib/
+# COPY --from=builder /usr/lib/libcurl.* /usr/lib/
+# COPY --from=builder /usr/lib/libzstd.* /usr/lib/
+# COPY --from=builder /usr/lib/libsasl2.* /usr/lib/
+# COPY --from=builder /usr/lib/libcares.* /usr/lib/
+# COPY --from=builder /usr/lib/libnghttp2.* /usr/lib/
+# COPY --from=builder /usr/lib/libidn2.* /usr/lib/
+
 COPY --from=builder /venv /venv
 COPY --from=builder /app/examples /examples
 COPY --from=builder /app/unknown-icon.png unknown-icon.png
 # as per Openshift guidelines, https://docs.openshift.com/container-platform/4.11/openshift_images/create-images.html#use-uid_create-images
+# RUN python -m confluent_kafka
 RUN chgrp -R 0 /app && chmod -R g=u /app && \
     chown -R keep:keep /app && \
     chown -R keep:keep /venv
 USER keep
+
+
 
 ENTRYPOINT ["/venv/lib/python3.13/site-packages/keep/entrypoint.sh"]
 
