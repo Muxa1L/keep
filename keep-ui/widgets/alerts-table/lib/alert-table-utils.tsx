@@ -9,6 +9,7 @@ import {
   AccessorKeyColumnDef,
 } from "@tanstack/react-table";
 import { AlertDto } from "@/entities/alerts/model";
+import { Status } from "@/entities/incidents/model/models";
 import { Accordion, AccordionBody, AccordionHeader, Icon } from "@tremor/react";
 import { AlertName } from "@/entities/alerts/ui";
 import AlertAssignee from "../ui/alert-assignee";
@@ -302,7 +303,12 @@ export const useAlertTableCols = (
             return provider?.details?.name || value;
           }
           if (context.column.id === "incident") {
-            const incidents = row.original.incident_dto || [];
+            // Show only active incidents (Firing/Acknowledged) in the Incident column
+            const incidents = (row.original.incident_dto || []).filter(
+              (incident) =>
+                incident.status === Status.Firing ||
+                incident.status === Status.Acknowledged
+            );
             return (
               <div className="flex flex-wrap gap-1 w-full overflow-hidden">
                 {incidents.map((incident) => {
