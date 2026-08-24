@@ -22,6 +22,7 @@ from keep.api.bl.enrichments_bl import EnrichmentsBl
 from keep.api.bl.incidents_bl import IncidentBl
 from keep.api.bl.maintenance_windows_bl import MaintenanceWindowsBl
 from keep.api.consts import KEEP_CORRELATION_ENABLED, MAINTENANCE_WINDOW_ALERT_STRATEGY
+from keep.api.core.distributed_lock import alert_processing_lock
 from keep.api.core.db import (
     bulk_upsert_alert_fields,
     enrich_alerts_with_incidents,
@@ -770,18 +771,23 @@ def process_event(
             with tracer.start_as_current_span("process_event_internal_preparation"):
                 __internal_prepartion(event, fingerprint, api_key_name)
 
-            formatted_events = __handle_formatted_events(
-                tenant_id,
-                provider_type,
-                session,
-                raw_event,
-                event,
-                tracer,
-                provider_id,
-                notify_client,
-                timestamp_forced,
-                job_id,
-            )
+            # HA deduplication guard: serialize per-fingerprint processing across
+            # instances so that two instances receiving the same alert don't both
+            # pass the dedup check and double-insert.  No-op when Redis is not
+            # configured or fingerprint is None.
+            with alert_processing_lock(tenant_id, fingerprint):
+                formatted_events = __handle_formatted_events(
+                    tenant_id,
+                    provider_type,
+                    session,
+                    raw_event,
+                    event,
+                    tracer,
+                    provider_id,
+                    notify_client,
+                    timestamp_forced,
+                    job_id,
+                )
 
             logger.info(
                 "Event processed",
