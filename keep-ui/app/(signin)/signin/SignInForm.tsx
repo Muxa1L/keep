@@ -30,6 +30,31 @@ interface SignInFormInputs {
   password: string;
 }
 
+/**
+ * Resolve the post-login redirect target from the ?callbackUrl= query param
+ * that middleware appends when bouncing an unauthenticated user to /signin,
+ * so the user returns to the page they came from (e.g. after a session
+ * expired while the tab was in the background).
+ *
+ * Only relative paths are accepted to prevent open redirects.
+ */
+function getSafeCallbackUrl(): string {
+  try {
+    const rawCallbackUrl =
+      new URLSearchParams(window.location.search).get("callbackUrl") || "";
+    if (
+      rawCallbackUrl.startsWith("/") &&
+      !rawCallbackUrl.startsWith("//") &&
+      !rawCallbackUrl.includes("://")
+    ) {
+      return rawCallbackUrl;
+    }
+  } catch (error) {
+    console.error("Failed to parse callbackUrl:", error);
+  }
+  return "/";
+}
+
 export default function SignInForm({
   params,
   searchParams,
@@ -67,30 +92,30 @@ export default function SignInForm({
         if (params?.amt) {
           signIn(
             "auth0",
-            { callbackUrl: "/" },
+            { callbackUrl: getSafeCallbackUrl() },
             { acr_values: `amt:${params.amt}` }
           );
         } else {
-          signIn("auth0", { callbackUrl: "/" });
+          signIn("auth0", { callbackUrl: getSafeCallbackUrl() });
         }
       } else if (providers.keycloak) {
         console.log("Signing in with keycloak provider");
-        signIn("keycloak", { callbackUrl: "/" });
+        signIn("keycloak", { callbackUrl: getSafeCallbackUrl() });
       } else if (providers.okta) {
         console.log("Signing in with Okta provider");
-        signIn("okta", { callbackUrl: "/" });
+        signIn("okta", { callbackUrl: getSafeCallbackUrl() });
       } else if (providers["microsoft-entra-id"]) {
         console.log("Signing in with Azure AD provider");
-        signIn("microsoft-entra-id", { callbackUrl: "/" });
+        signIn("microsoft-entra-id", { callbackUrl: getSafeCallbackUrl() });
       } else if (providers.onelogin) {
         console.log("Signing in with OneLogin provider");
-        signIn("onelogin", { callbackUrl: "/" });
+        signIn("onelogin", { callbackUrl: getSafeCallbackUrl() });
       } else if (
         providers.credentials &&
         providers.credentials.name === "OAuth2Proxy"
       ) {
         console.log("Signing in with OAuth2Proxy provider");
-        signIn("credentials", { callbackUrl: "/" });
+        signIn("credentials", { callbackUrl: getSafeCallbackUrl() });
       } else if (
         providers.credentials &&
         providers.credentials.name == "NoAuth"

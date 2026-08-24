@@ -51,6 +51,12 @@ export const proxyUrl =
   process.env.http_proxy ||
   process.env.https_proxy;
 
+// Refresh the access token slightly *before* it actually expires. This avoids
+// racing requests that would go out with an about-to-expire token — e.g. right
+// after the user returns to a background tab and SWR refetches with the
+// cached session.
+const ACCESS_TOKEN_REFRESH_BUFFER_MS = 30_000;
+
 async function refreshAccessToken(token: any) {
   let issuerUrl = "";
   let clientId = "";
@@ -471,7 +477,7 @@ export const config = {
         token.refreshToken &&
         token.accessTokenExpires &&
         typeof token.accessTokenExpires === "number" &&
-        Date.now() > token.accessTokenExpires
+        Date.now() > token.accessTokenExpires - ACCESS_TOKEN_REFRESH_BUFFER_MS
       ) {
         token = await refreshAccessToken(token);
         if (!token.accessToken) {

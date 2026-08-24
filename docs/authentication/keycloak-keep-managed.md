@@ -50,6 +50,33 @@ The frontend configuration is identical to the standard Keycloak provider. Set `
 | `KEYCLOAK_SECRET` | Yes | Same as `KEYCLOAK_CLIENT_SECRET` above |
 | `KEYCLOAK_ISSUER` | Yes | `{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}` |
 
+## Token refresh & session behavior
+
+Token refresh is handled entirely by the frontend (NextAuth); the backend
+remains stateless and only validates whatever access token arrives.
+
+1. On sign-in, NextAuth stores the Keycloak **refresh token** and the access
+   token expiry in the encrypted session JWT.
+2. Whenever a session is read after the access token has expired (or is about
+   to expire, within a 30-second safety buffer), NextAuth silently exchanges
+   the refresh token at `{KEYCLOAK_ISSUER}/protocol/openid-connect/token`
+   (`grant_type=refresh_token`) and swaps in the new access token.
+3. If an API request still goes out with an expired token (e.g. right after
+   the user returns to a background tab), the API client forces one session
+   refresh and retries the request with the fresh token before giving up.
+4. Only when the refresh token itself is no longer valid (for example after
+   Keycloak's **SSO Session Idle** timeout) is the user signed out. In that
+   case they are redirected through `/signin?callbackUrl=<last page>` and
+   returned to the exact page (including filters) they left after re-login.
+
+Relevant Keycloak realm/client settings:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| Client → **Standard flow** | Enabled | Required — issues refresh tokens |
+| Realm → Tokens → **Access Token Lifespan** | 5 minutes | How often silent refresh runs |
+| Realm → Tokens → **SSO Session Idle** | 30 minutes | Max idle time before re-login is required |
+
 ## Role mapping
 
 The provider resolves the Keep role from the JWT in the following priority order:

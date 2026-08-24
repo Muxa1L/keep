@@ -1,5 +1,5 @@
-import { ApiClient } from "../ApiClient";
-import { signOut as signOutClient } from "next-auth/react";
+import { ApiClient, resetSessionRefreshForTests } from "../ApiClient";
+import { signOut as signOutClient, getSession } from "next-auth/react";
 import { AuthType } from "@/utils/authenticationType";
 import { Session } from "next-auth";
 import { InternalConfig } from "@/types/internal-config";
@@ -7,6 +7,7 @@ import { InternalConfig } from "@/types/internal-config";
 // Mock dependencies
 jest.mock("next-auth/react", () => ({
   signOut: jest.fn(),
+  getSession: jest.fn(),
 }));
 
 jest.mock("@sentry/nextjs", () => ({
@@ -50,6 +51,8 @@ describe("ApiClient", () => {
     jest.clearAllMocks();
     global.fetch = jest.fn();
     locationHref = "";
+    resetSessionRefreshForTests();
+    (getSession as jest.Mock).mockResolvedValue(null);
 
     // Mock window.location.href using Object.defineProperty
     Object.defineProperty(window, "location", {
@@ -156,6 +159,121 @@ describe("ApiClient", () => {
       ).rejects.toThrow();
 
       // On server side, neither redirect nor signOut should be called
+      expect(signOutClient).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("request() silent recovery on 401", () => {
+    it("should refresh the session and retry once with the fresh token for KEYCLOAK", async () => {
+      const client = new ApiClient(mockSession, createConfig(AuthType.KEYCLOAK));
+      const refreshedSession = {
+        ...mockSession,
+        accessToken: "fresh-token",
+      } as Session;
+
+      (getSession as jest.Mock).mockResolvedValue(refreshedSession);
+      (global.fetch as jest.Mock)
+        .mockResolvedValueOnce(
+          createMockResponse(
+            { message: "Unauthorized", detail: "Token expired" },
+            401
+          )
+        )
+        .mockResolvedValueOnce(createMockResponse({ id: 1 }, 200));
+
+      const result = await client.request("/test-url");
+
+      expect(result).toEqual({ id: 1 });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      // the retry must carry the refreshed access token
+      const retryInit = (global.fetch as jest.Mock).mock.calls[1][1] as RequestInit;
+      expect((retryInit.headers as Record<string, string>).Authorization).toBe(
+        "Bearer fresh-token"
+      );
+      expect(signOutClient).not.toHaveBeenCalled();
+    });
+
+    it("should not retry when the session token did not change", async () => {
+      const client = new ApiClient(mockSession, createConfig(AuthType.KEYCLOAK));
+      (getSession as jest.Mock).mockResolvedValue(mockSession);
+
+      (global.fetch as jest.Mock).mockResolvedValue(
+        createMockResponse(
+          { message: "Unauthorized", detail: "Token expired" },
+          401
+        )
+      );
+
+      await expect(client.request("/test-url")).rejects.toThrow();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(signOutClient).toHaveBeenCalled();
+    });
+
+    it("should not retry when the session refresh returns null", async () => {
+      const client = new ApiClient(mockSession, createConfig(AuthType.KEYCLOAK));
+      (getSession as jest.Mock).mockResolvedValue(null);
+
+      (global.fetch as jest.Mock).mockResolvedValue(
+        createMockResponse(
+          { message: "Unauthorized", detail: "Token expired" },
+          401
+        )
+      );
+
+      await expect(client.request("/test-url")).rejects.toThrow();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(signOutClient).toHaveBeenCalled();
+    });
+
+    it("should skip recovery for OAUTH2PROXY auth type", async () => {
+      const client = new ApiClient(
+        mockSession,
+        createConfig(AuthType.OAUTH2PROXY)
+      );
+
+      (global.fetch as jest.Mock).mockResolvedValue(
+        createMockResponse(
+          { message: "Unauthorized", detail: "Token expired" },
+          401
+        )
+      );
+
+      await expect(client.request("/test-url")).rejects.toThrow();
+      expect(getSession).not.toHaveBeenCalled();
+      expect(locationHref).toBe("/oauth2/sign_out");
+    });
+
+    it("should share a single session refresh across parallel 401s", async () => {
+      const client = new ApiClient(mockSession, createConfig(AuthType.KEYCLOAK));
+      const refreshedSession = {
+        ...mockSession,
+        accessToken: "fresh-token",
+      } as Session;
+
+      (getSession as jest.Mock).mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve(refreshedSession), 10)
+          )
+      );
+      (global.fetch as jest.Mock).mockImplementation(
+        async (_url: string, init?: RequestInit) => {
+          const authHeader = (init?.headers as Record<string, string>)
+            ?.Authorization;
+          if (authHeader === "Bearer test-token") {
+            return createMockResponse(
+              { message: "Unauthorized", detail: "Token expired" },
+              401
+            );
+          }
+          return createMockResponse({ ok: true }, 200);
+        }
+      );
+
+      await Promise.all([client.request("/a"), client.request("/b")]);
+
+      // only one refresh grant despite two unauthorized requests
+      expect(getSession).toHaveBeenCalledTimes(1);
       expect(signOutClient).not.toHaveBeenCalled();
     });
   });

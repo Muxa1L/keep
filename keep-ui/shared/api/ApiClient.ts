@@ -4,7 +4,7 @@ import { KeepApiError, KeepApiReadOnlyError } from "./KeepApiError";
 import { getApiUrlFromConfig } from "@/shared/lib/getApiUrlFromConfig";
 import { getApiURL } from "@/utils/apiUrl";
 import * as Sentry from "@sentry/nextjs";
-import { signOut as signOutClient } from "next-auth/react";
+import { getSession, signOut as signOutClient } from "next-auth/react";
 import { GuestSession } from "@/types/auth";
 import { AuthType } from "@/utils/authenticationType";
 
@@ -17,6 +17,33 @@ const READ_ONLY_ALWAYS_ALLOWED_URLS = [
   "/workflows/query",
   "/workflows/facets/options",
 ];
+
+// Shared in-flight promise so that parallel requests hitting a 401 trigger
+// only a single session refresh. This matters because providers like Keycloak
+// rotate refresh tokens — concurrent refresh grants can invalidate the session.
+let sessionRefreshPromise: Promise<Session | null> | null = null;
+
+/**
+ * Force NextAuth to re-read the session. On the server this runs the jwt
+ * callback, which silently exchanges the stored refresh token for a fresh
+ * access token when the current one has expired.
+ */
+async function refreshSessionOnce(): Promise<Session | null> {
+  if (!sessionRefreshPromise) {
+    sessionRefreshPromise = getSession().finally(() => {
+      // Clear the guard once settled so later expiries can refresh again.
+      setTimeout(() => {
+        sessionRefreshPromise = null;
+      }, 0);
+    });
+  }
+  return sessionRefreshPromise;
+}
+
+/** Test-only helper to clear the shared refresh guard between tests. */
+export function resetSessionRefreshForTests(): void {
+  sessionRefreshPromise = null;
+}
 
 interface ApiClientOptions {
   headers?: Record<string, string>;
@@ -67,6 +94,21 @@ export class ApiClient {
       return `${window.location.origin}${baseUrl}`;
     }
     return baseUrl;
+  }
+
+  /**
+   * Whether a silent recovery attempt is possible for an unauthorized
+   * request: only in the browser, for auth types backed by a refreshable
+   * NextAuth session, and never for guest sessions.
+   */
+  private canAttemptSilentRecovery(): boolean {
+    return (
+      !this.isServer &&
+      !!this.config &&
+      this.config.AUTH_TYPE !== AuthType.OAUTH2PROXY &&
+      !!this.session &&
+      this.session.accessToken !== "unauthenticated"
+    );
   }
 
   async handleResponse(response: Response, url: string) {
@@ -169,6 +211,32 @@ export class ApiClient {
         ...requestInit.headers,
       },
     });
+
+    // Silent recovery: if we got an unauthorized response in the browser,
+    // force NextAuth to refresh the session (the jwt callback performs the
+    // refresh-token grant) and retry the request once with the fresh access
+    // token before falling back to the sign-out flow in handleResponse.
+    if (response.status === 401 && this.canAttemptSilentRecovery()) {
+      const refreshedSession = await refreshSessionOnce();
+      const refreshedAccessToken = refreshedSession?.accessToken;
+      if (
+        typeof refreshedAccessToken === "string" &&
+        refreshedAccessToken.length > 0 &&
+        refreshedAccessToken !== this.session?.accessToken
+      ) {
+        const retriedResponse = await fetch(fullUrl, {
+          ...requestInit,
+          headers: {
+            ...(this.getHeaders() as HeadersInit),
+            ...requestInit.headers,
+            // override with the refreshed access token
+            Authorization: `Bearer ${refreshedAccessToken}`,
+          } as HeadersInit,
+        });
+        return this.handleResponse(retriedResponse, url);
+      }
+    }
+
     return this.handleResponse(response, url);
   }
 
