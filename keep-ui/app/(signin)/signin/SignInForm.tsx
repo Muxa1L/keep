@@ -42,12 +42,22 @@ function getSafeCallbackUrl(): string {
   try {
     const rawCallbackUrl =
       new URLSearchParams(window.location.search).get("callbackUrl") || "";
+    if (!rawCallbackUrl) {
+      return "/";
+    }
+    // Allow relative paths (starting with a single "/")
     if (
       rawCallbackUrl.startsWith("/") &&
       !rawCallbackUrl.startsWith("//") &&
       !rawCallbackUrl.includes("://")
     ) {
       return rawCallbackUrl;
+    }
+    // Middleware passes an absolute URL — allow it only when it points to
+    // our own origin, and normalize it to a relative path.
+    const parsed = new URL(rawCallbackUrl, window.location.origin);
+    if (parsed.origin === window.location.origin) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
     }
   } catch (error) {
     console.error("Failed to parse callbackUrl:", error);
