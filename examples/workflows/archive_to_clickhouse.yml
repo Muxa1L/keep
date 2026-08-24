@@ -1,0 +1,23 @@
+workflow:
+  id: archive-to-clickhouse
+  name: Archive Keep alerts and incidents to ClickHouse
+  description: |
+    Incrementally copies Keep alerts (raw event log), incidents, and
+    alert↔incident links to a ClickHouse warehouse for long-term storage.
+
+    The provider is self-contained: a single action fetches the data from
+    Keep's own DB and pushes it to ClickHouse, creating the destination
+    tables (keep_alerts, keep_incidents, keep_alert_incident_links) if they
+    do not exist. Each run queries ClickHouse for the MAX watermark already
+    stored per tenant and copies only newer records, so the operation is
+    idempotent and restart-safe.
+  triggers:
+    - type: manual
+    - type: interval
+      value: 300   # every 5 minutes
+  actions:
+    - name: archive-to-clickhouse
+      provider:
+        type: clickhouse_archive
+        config: " {{ providers.clickhouse-warehouse }} "
+        with: {}
