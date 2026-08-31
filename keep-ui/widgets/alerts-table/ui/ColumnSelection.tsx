@@ -26,6 +26,7 @@ export default function ColumnSelection({
   const {
     columnVisibility,
     columnOrder,
+    incidentShowOnlyActive,
     updateMultipleColumnConfigs,
     isLoading,
     useBackend,
@@ -40,6 +41,8 @@ export default function ColumnSelection({
   // Local state to track checkbox changes before submission
   const [localColumnVisibility, setLocalColumnVisibility] =
     useState<VisibilityState>(columnVisibility);
+  const [localIncidentShowOnlyActive, setLocalIncidentShowOnlyActive] =
+    useState(incidentShowOnlyActive);
   
   // Use a ref to track the previous columnVisibility to prevent infinite loops
   const prevColumnVisibilityRef = React.useRef<VisibilityState>(columnVisibility);
@@ -60,6 +63,11 @@ export default function ColumnSelection({
       prevColumnVisibilityRef.current = columnVisibility;
     }
   }, [columnVisibility, presetName]);
+
+  // Keep the incident toggle in sync when backend config finishes loading
+  React.useEffect(() => {
+    setLocalIncidentShowOnlyActive(incidentShowOnlyActive);
+  }, [incidentShowOnlyActive]);
 
   // Common enrichment fields that should always be available for selection
   const COMMON_ENRICHMENT_FIELDS = [
@@ -171,6 +179,7 @@ export default function ColumnSelection({
       await updateMultipleColumnConfigs({
         columnVisibility: localColumnVisibility,
         columnOrder: finalOrder,
+        incidentShowOnlyActive: localIncidentShowOnlyActive,
       });
       onClose?.();
     } catch (error) {
@@ -244,6 +253,18 @@ export default function ColumnSelection({
           )}
         </div>
       </div>
+      {localColumnVisibility["incident"] && (
+        <label className="cursor-pointer p-2 flex items-center text-sm">
+          <input
+            className="mr-2"
+            type="checkbox"
+            checked={localIncidentShowOnlyActive}
+            onChange={(e) => setLocalIncidentShowOnlyActive(e.target.checked)}
+            data-testid="incident-show-only-active"
+          />
+          Incident column: show only active incidents
+        </label>
+      )}
       <Button
         className="mt-4"
         color="orange"

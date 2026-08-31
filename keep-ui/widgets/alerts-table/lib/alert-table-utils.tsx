@@ -200,6 +200,7 @@ interface GenerateAlertTableColsArg {
   setChangeStatusAlert?: (alert: AlertDto) => void;
   presetName: string;
   presetNoisy?: boolean;
+  incidentShowOnlyActive?: boolean;
   MenuComponent?: (alert: AlertDto) => React.ReactNode;
   extraColumns?: AccessorKeyColumnDef<AlertDto, boolean | undefined>[];
 }
@@ -216,6 +217,7 @@ export const useAlertTableCols = (
     setChangeStatusAlert,
     presetName,
     presetNoisy = false,
+    incidentShowOnlyActive = true,
     MenuComponent,
     extraColumns = [],
   }: GenerateAlertTableColsArg = { presetName: "feed" }
@@ -306,6 +308,7 @@ export const useAlertTableCols = (
             // Show only active incidents (Firing/Acknowledged) in the Incident column
             const incidents = (row.original.incident_dto || []).filter(
               (incident) =>
+                !incidentShowOnlyActive ||
                 incident.status === Status.Firing ||
                 incident.status === Status.Acknowledged
             );

@@ -593,6 +593,7 @@ class ColumnConfigurationDto(BaseModel):
     column_rename_mapping: dict[str, str] = {}
     column_time_formats: dict[str, str] = {}
     column_list_formats: dict[str, str] = {}
+    column_incident_show_only_active: bool | None = None
 
 
 @router.put(
@@ -627,7 +628,8 @@ def update_preset_column_config(
             "column_order", 
             "column_rename_mapping", 
             "column_time_formats", 
-            "column_list_formats"
+            "column_list_formats", 
+            "column_incident_show_only_active"
         ]
     ]
 
@@ -660,6 +662,12 @@ def update_preset_column_config(
         current_options.append({
             "label": "column_list_formats",
             "value": body.column_list_formats
+        })
+
+    if body.column_incident_show_only_active is not None:
+        current_options.append({
+            "label": "column_incident_show_only_active",
+            "value": body.column_incident_show_only_active
         })
 
     # Update the preset options
@@ -702,4 +710,5 @@ def get_preset_column_config(
         column_rename_mapping=preset_dto.column_rename_mapping,
         column_time_formats=preset_dto.column_time_formats,
         column_list_formats=preset_dto.column_list_formats,
+        column_incident_show_only_active=preset_dto.column_incident_show_only_active,
     )

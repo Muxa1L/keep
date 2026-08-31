@@ -65,6 +65,14 @@ export const usePresetColumnState = ({
     Record<string, ListFormatOption>
   >(`column-list-formats-${presetName}`, {});
 
+  const [
+    localIncidentShowOnlyActive,
+    setLocalIncidentShowOnlyActive,
+  ] = useLocalStorage<boolean>(
+    `column-incident-show-only-active-${presetName}`,
+    true
+  );
+
   // Determine which state to use - with fallback to local storage on error
   // Always return immediately with either backend or local data
   const columnVisibility = useMemo(() => {
@@ -141,6 +149,18 @@ export const usePresetColumnState = ({
     error,
   ]);
 
+  const incidentShowOnlyActive = useMemo(() => {
+    if (!shouldUseBackend || error) {
+      return localIncidentShowOnlyActive;
+    }
+    return columnConfig?.column_incident_show_only_active ?? true;
+  }, [
+    shouldUseBackend,
+    columnConfig?.column_incident_show_only_active,
+    localIncidentShowOnlyActive,
+    error,
+  ]);
+
   // Batched update function to avoid multiple API calls
   const updateMultipleColumnConfigs = useCallback(
     async (updates: {
@@ -149,6 +169,7 @@ export const usePresetColumnState = ({
       columnRenameMapping?: ColumnRenameMapping;
       columnTimeFormats?: Record<string, TimeFormatOption>;
       columnListFormats?: Record<string, ListFormatOption>;
+      incidentShowOnlyActive?: boolean;
     }) => {
       if (shouldUseBackend && !error) {
         // Always send the FULL current config to the backend.
@@ -163,6 +184,8 @@ export const usePresetColumnState = ({
             updates.columnRenameMapping ?? columnRenameMapping,
           column_time_formats: updates.columnTimeFormats ?? columnTimeFormats,
           column_list_formats: updates.columnListFormats ?? columnListFormats,
+          column_incident_show_only_active:
+            updates.incidentShowOnlyActive ?? incidentShowOnlyActive,
         };
 
         try {
@@ -193,6 +216,9 @@ export const usePresetColumnState = ({
       if (updates.columnListFormats !== undefined) {
         setLocalColumnListFormats(updates.columnListFormats);
       }
+      if (updates.incidentShowOnlyActive !== undefined) {
+        setLocalIncidentShowOnlyActive(updates.incidentShowOnlyActive);
+      }
       return Promise.resolve();
     },
     [
@@ -203,6 +229,7 @@ export const usePresetColumnState = ({
       setLocalColumnRenameMapping,
       setLocalColumnTimeFormats,
       setLocalColumnListFormats,
+      setLocalIncidentShowOnlyActive,
       error,
       // Current state values needed as baseline for full-config PUT
       columnVisibility,
@@ -210,6 +237,7 @@ export const usePresetColumnState = ({
       columnRenameMapping,
       columnTimeFormats,
       columnListFormats,
+      incidentShowOnlyActive,
     ]
   );
 
@@ -249,12 +277,23 @@ export const usePresetColumnState = ({
     [updateMultipleColumnConfigs]
   );
 
+  const setIncidentShowOnlyActive = useCallback(
+    (showOnlyActive: boolean) => {
+      return updateMultipleColumnConfigs({
+        incidentShowOnlyActive: showOnlyActive,
+      });
+    },
+    [updateMultipleColumnConfigs]
+  );
+
   return {
     columnVisibility,
     columnOrder,
     columnRenameMapping,
     columnTimeFormats,
     columnListFormats,
+    incidentShowOnlyActive,
+    setIncidentShowOnlyActive,
     setColumnVisibility,
     setColumnOrder,
     setColumnRenameMapping,

@@ -16,6 +16,7 @@ export interface ColumnConfiguration {
   column_rename_mapping: Record<string, string>;
   column_time_formats: Record<string, string>;
   column_list_formats: Record<string, string>;
+  column_incident_show_only_active?: boolean;
 }
 
 export interface Preset {

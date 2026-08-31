@@ -8,6 +8,7 @@ import {
   getTabsFromPreset,
 } from "@/entities/alerts/model";
 import { Preset } from "@/entities/presets/model/types";
+import { usePresetColumnState } from "@/entities/presets/model";
 import { AlertsTableDataQuery } from "@/widgets/alerts-table/ui/useAlertsTableData";
 
 interface Props {
@@ -66,7 +67,14 @@ export default function AlertTableTabPanelServerSide({
     ),
   ];
 
+  const { incidentShowOnlyActive } = usePresetColumnState({
+    presetName: preset.name,
+    presetId: preset.id,
+    useBackend: !!preset.id,
+  });
+
   const alertTableColumns = useAlertTableCols({
+    incidentShowOnlyActive,
     additionalColsToGenerate: additionalColsToGenerate,
     isCheckboxDisplayed:
       preset.name !== "deleted" && preset.name !== "dismissed",

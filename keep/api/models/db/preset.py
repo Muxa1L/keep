@@ -184,6 +184,18 @@ class PresetDto(BaseModel, extra="ignore"):
         return config[0].get("value", {})
 
     @property
+    def column_incident_show_only_active(self) -> Optional[bool]:
+        """Get whether the incident column shows only active incidents"""
+        config = [
+            option
+            for option in self.options
+            if option.get("label", "").lower() == "column_incident_show_only_active"
+        ]
+        if not config:
+            return None
+        return config[0].get("value")
+
+    @property
     def query(self) -> PresetSearchQuery:
         return PresetSearchQuery(
             cel_query=self.cel_query,
