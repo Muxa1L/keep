@@ -107,6 +107,10 @@ export const CorrelationTable = ({ rules }: CorrelationTableProps) => {
           <GroupedByCell fields={context.getValue()}></GroupedByCell>
         ),
       }),
+      columnHelper.accessor("priority", {
+        header: "Priority",
+        cell: (context) => context.getValue(),
+      }),
       columnHelper.accessor("incidents", {
         header: "Incidents",
         cell: (context) => context.getValue(),

@@ -2458,3 +2458,239 @@ def test_rule_alerts_threshold_same_fingerprint(db_session, create_alert):
         [last_alert],
     )
     assert last_alert_dto[0].unresolvedCounter == 2
+
+
+# Tests for rule priority: lower value = higher precedence.
+# When multiple rules match the same alert, only the matching rules with the
+# best (lowest) priority value are executed; rules with the same priority are
+# all executed.
+
+
+def test_rule_priority_higher_precedence_rule_wins(db_session):
+    # Two rules match the same alert but with different priorities:
+    # only the rule with the best (lowest) priority should create an incident
+    alerts = [
+        AlertDto(
+            id="priority-test-1",
+            source=["grafana"],
+            name="priority-test-alert",
+            status=AlertStatus.FIRING,
+            severity=AlertSeverity.CRITICAL,
+            lastReceived=datetime.datetime.now().isoformat(),
+        ),
+    ]
+    rules_engine = RulesEngine(tenant_id=SINGLE_TENANT_UUID)
+
+    # lower precedence rule (default priority, 100)
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="lower-precedence-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana")',
+        created_by="test@keephq.dev",
+    )
+    # higher precedence rule (priority 1)
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="higher-precedence-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana" && severity == "critical")',
+        created_by="test@keephq.dev",
+        priority=1,
+    )
+
+    # add the alert to the db
+    alert = Alert(
+        tenant_id=SINGLE_TENANT_UUID,
+        provider_type="test",
+        provider_id="test",
+        event=alerts[0].dict(),
+        fingerprint=alerts[0].fingerprint,
+    )
+    db_session.add(alert)
+    db_session.commit()
+    set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
+    alerts[0].event_id = alert.id
+
+    # run the rules engine
+    results = rules_engine.run_rules(alerts, session=db_session)
+
+    # only the higher precedence rule should create an incident
+    rules = get_rules_db(SINGLE_TENANT_UUID)
+    higher_precedence_rule = next(
+        rule for rule in rules if rule.name == "higher-precedence-rule"
+    )
+    assert len(results) == 1
+    incidents = db_session.query(Incident).all()
+    assert len(incidents) == 1
+    assert str(incidents[0].rule_id) == str(higher_precedence_rule.id)
+
+
+def test_rule_priority_same_priority_rules_all_executed(db_session):
+    # Two rules with the same priority match the same alert:
+    # both rules should create incidents
+    alerts = [
+        AlertDto(
+            id="priority-test-2",
+            source=["grafana"],
+            name="priority-test-alert",
+            status=AlertStatus.FIRING,
+            severity=AlertSeverity.CRITICAL,
+            lastReceived=datetime.datetime.now().isoformat(),
+        ),
+    ]
+    rules_engine = RulesEngine(tenant_id=SINGLE_TENANT_UUID)
+
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="same-priority-rule-1",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana")',
+        created_by="test@keephq.dev",
+        priority=50,
+    )
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="same-priority-rule-2",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana" && severity == "critical")',
+        created_by="test@keephq.dev",
+        priority=50,
+    )
+
+    # add the alert to the db
+    alert = Alert(
+        tenant_id=SINGLE_TENANT_UUID,
+        provider_type="test",
+        provider_id="test",
+        event=alerts[0].dict(),
+        fingerprint=alerts[0].fingerprint,
+    )
+    db_session.add(alert)
+    db_session.commit()
+    set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
+    alerts[0].event_id = alert.id
+
+    # run the rules engine
+    results = rules_engine.run_rules(alerts, session=db_session)
+
+    # both rules should create an incident
+    rules = get_rules_db(SINGLE_TENANT_UUID)
+    assert len(rules) == 2
+    assert len(results) == 2
+    incidents = db_session.query(Incident).all()
+    assert len(incidents) == 2
+    assert {str(incident.rule_id) for incident in incidents} == {
+        str(rule.id) for rule in rules
+    }
+
+
+def test_rule_priority_lower_priority_rule_still_applies_to_other_alerts(db_session):
+    # A higher precedence rule matches grafana alerts only,
+    # while a lower precedence rule matches both grafana and sentry alerts:
+    # the grafana alert should be correlated by the higher precedence rule only,
+    # while the sentry alert should still be correlated by the lower precedence rule
+    alerts = [
+        AlertDto(
+            id="priority-test-grafana",
+            source=["grafana"],
+            name="grafana-alert",
+            status=AlertStatus.FIRING,
+            severity=AlertSeverity.CRITICAL,
+            lastReceived=datetime.datetime.now().isoformat(),
+        ),
+        AlertDto(
+            id="priority-test-sentry",
+            source=["sentry"],
+            name="sentry-alert",
+            status=AlertStatus.FIRING,
+            severity=AlertSeverity.CRITICAL,
+            lastReceived=datetime.datetime.now().isoformat(),
+        ),
+    ]
+    rules_engine = RulesEngine(tenant_id=SINGLE_TENANT_UUID)
+
+    # higher precedence rule (priority 1) matches grafana alerts only
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="higher-precedence-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana")',
+        created_by="test@keephq.dev",
+        priority=1,
+    )
+    # lower precedence rule (default priority, 100) matches grafana and sentry alerts
+    create_rule_db(
+        tenant_id=SINGLE_TENANT_UUID,
+        name="lower-precedence-rule",
+        definition={
+            "sql": "N/A",  # we don't use it anymore
+            "params": {},
+        },
+        timeframe=600,
+        timeunit="seconds",
+        definition_cel='(source == "grafana") || (source == "sentry")',
+        created_by="test@keephq.dev",
+    )
+
+    # add the alerts to the db
+    for alert_dto in alerts:
+        alert = Alert(
+            tenant_id=SINGLE_TENANT_UUID,
+            provider_type="test",
+            provider_id="test",
+            event=alert_dto.dict(),
+            fingerprint=alert_dto.fingerprint,
+        )
+        db_session.add(alert)
+        db_session.commit()
+        set_last_alert(SINGLE_TENANT_UUID, alert, db_session)
+        alert_dto.event_id = alert.id
+
+    # run the rules engine
+    results = rules_engine.run_rules(alerts, session=db_session)
+
+    # one incident is created by each rule
+    assert len(results) == 2
+    rules = get_rules_db(SINGLE_TENANT_UUID)
+    rules_by_id = {str(rule.id): rule.name for rule in rules}
+
+    # the grafana alert is correlated by the higher precedence rule only,
+    # while the sentry alert is correlated by the lower precedence rule only
+    incidents = db_session.query(Incident).all()
+    assert len(incidents) == 2
+    for incident in incidents:
+        enrich_incidents_with_alerts(SINGLE_TENANT_UUID, [incident], db_session)
+        alert_sources = [alert.event.get("source") for alert in incident.alerts]
+        rule_name = rules_by_id[str(incident.rule_id)]
+        if rule_name == "higher-precedence-rule":
+            assert alert_sources == [["grafana"]]
+        elif rule_name == "lower-precedence-rule":
+            assert alert_sources == [["sentry"]]
+        else:
+            pytest.fail(f"Unexpected rule created an incident: {rule_name}")

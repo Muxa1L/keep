@@ -305,6 +305,48 @@ export const CorrelationForm = ({
           />
         </div>
 
+        <div>
+          <label
+            className="flex items-center text-tremor-default font-medium text-tremor-content-strong mt-1"
+            htmlFor="priority"
+          >
+            Priority{" "}
+            <Button
+              className="cursor-default ml-2"
+              type="button"
+              tooltip="Lower number = higher precedence. When multiple correlation rules match the same alert, only the rules with the best (lowest) priority number create incidents. Rules with the same priority are all executed. Default: 100."
+              icon={QuestionMarkCircleIcon}
+              size="xs"
+              variant="light"
+              color="slate"
+            />
+          </label>
+
+          <Controller
+            control={control}
+            name="priority"
+            render={({ field: { value, onChange } }) => (
+              <Input
+                type="number"
+                placeholder="100"
+                className="mt-2"
+                {...register("priority", {
+                  required: {
+                    message: "Priority is required",
+                    value: false,
+                  },
+                  validate: (value) => {
+                    if (value <= 0) {
+                      return "Priority should be positive";
+                    }
+                    return true;
+                  },
+                })}
+              />
+            )}
+          />
+        </div>
+
         <div className="ml-2.5">
           <label
             className="flex items-center text-tremor-default font-medium text-tremor-content-strong mt-1"

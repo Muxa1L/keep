@@ -2373,6 +2373,7 @@ def create_rule(
     multi_level_property_name=None,
     threshold=1,
     assignee=None,
+    priority=RULE_DEFAULT_PRIORITY,
 ):
     grouping_criteria = grouping_criteria or []
     with Session(engine) as session:
@@ -2396,6 +2397,7 @@ def create_rule(
             multi_level_property_name=multi_level_property_name,
             threshold=threshold,
             assignee=assignee,
+            priority=priority,
         )
         session.add(rule)
         session.commit()
@@ -2422,6 +2424,7 @@ def update_rule(
     multi_level_property_name,
     threshold,
     assignee=None,
+    priority=RULE_DEFAULT_PRIORITY,
 ):
     rule_uuid = __convert_to_uuid(rule_id)
     if not rule_uuid:
@@ -2450,6 +2453,7 @@ def update_rule(
             rule.multi_level_property_name = multi_level_property_name
             rule.threshold = threshold
             rule.assignee = assignee
+            rule.priority = priority
             session.commit()
             session.refresh(rule)
             return rule

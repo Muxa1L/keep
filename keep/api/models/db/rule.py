@@ -23,6 +23,13 @@ class CreateIncidentOn(Enum):
     ALL = "all"
 
 
+# P0/P1-style rule priority: lower value = higher precedence.
+# When multiple rules match the same alert, only the matching rules with the
+# best (lowest) priority value are executed; rules with the same priority are
+# all executed.
+RULE_DEFAULT_PRIORITY = 100
+
+
 # TODOs/Pitfalls down the road which we hopefully need to address in the future:
 # 1. nested attibtues (event.foo.bar = 1)
 # 2. scale - when event arrives, we need to check if the rule is applicable to the event
@@ -58,3 +65,8 @@ class Rule(SQLModel, table=True):
     multi_level_property_name: str | None = None
     threshold: int = Field(sa_column_args=(CheckConstraint("threshold>0"),), default=1)
     assignee: str | None = None
+    # P0/P1-style priority: lower value = higher precedence.
+    # When multiple rules match the same alert, only the matching rules with the
+    # best (lowest) priority are executed, rules with the same priority are all
+    # executed.
+    priority: int = Field(default=RULE_DEFAULT_PRIORITY)

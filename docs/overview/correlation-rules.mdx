@@ -26,6 +26,25 @@ Creating a rule involves defining the conditions under which an alert should be 
  - **Logical grouping**: Combine conditions using logical operators to form comprehensive rules.
  - **Manual approve**: Create Incident-candidate or full-fledged incident.
 
+## Rule Priority
+
+Every correlation rule has a priority — an integer where a **lower number means higher precedence** (P0/P1-style). The default priority is `100`.
+
+When an alert arrives and multiple correlation rules match it, Keep executes only the matching rules with the best (lowest) priority number:
+
+- Matching rules that share the best priority are **all executed**.
+- Matching rules with a worse (higher) priority number are **skipped** for that alert.
+- Lower-priority rules still execute normally for alerts that the higher-priority rules don't match.
+
+For example, given these rules:
+
+| Rule | Conditions (CEL) | Priority |
+| ---- | ---------------- | -------- |
+| Critical payment incidents | `severity == "critical" && service == "payments"` | 1 |
+| All critical alerts | `severity == "critical"` | 100 |
+
+A critical alert from the `payments` service matches both rules, but only "Critical payment incidents" (priority 1) creates the incident — "All critical alerts" is skipped for that alert. A critical alert from any other service matches only "All critical alerts", so that rule still creates the incident.
+
 ## Dynamic Incident Naming
 
 The correlation engine supports dynamic incident naming based on alert attributes. This allows you to create more meaningful and context-aware incident names that reflect the actual alert data.

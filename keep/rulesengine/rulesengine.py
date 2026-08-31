@@ -81,10 +81,17 @@ class RulesEngine:
         """
         self.logger.info("Running rules")
         rules = get_rules_db(tenant_id=self.tenant_id)
+        # Lower priority value means higher precedence (P0/P1-style),
+        # so sort the rules to evaluate and execute the most precedent ones first
+        rules = sorted(rules, key=lambda rule: rule.priority)
 
-        incidents_dto = {}
+        # Phase 1: evaluate which rules are relevant to which events and
+        # calculate, per event, the best (lowest) priority among the matching rules
+        matched_events_per_rule: dict = {}  # rule.id -> list of (event, matched_rules)
+        best_priority_per_event: dict = {}  # event.id -> best priority of matching rules
         for rule in rules:
             self.logger.info(f"Evaluating rule {rule.name}")
+            matched_events = []
             for event in events:
                 self.logger.info(
                     f"Checking if rule {rule.name} apply to event {event.id}"
@@ -112,108 +119,126 @@ class RulesEngine:
                     self.logger.info(
                         f"Rule {rule.name} on event {event.id} is relevant"
                     )
-
-                    rule_fingerprints = self._calc_rule_fingerprint(event, rule)
-
-                    for rule_fingerprint in rule_fingerprints:
-                        # #If the alert recover its previous status, we need to check if there are any alerts with the same fingerprint that were resolved
-                        creation_allowed = True
-                        if hasattr(event, "previous_status") and (event.previous_status == AlertStatus.MAINTENANCE.value):
-                            alerts_solved = get_alerts_by_fingerprint(self.tenant_id, event.fingerprint, status=AlertStatus.RESOLVED.value)
-                            if alerts_solved and any(event.lastReceived < solved_alert.event["lastReceived"] for solved_alert in alerts_solved):
-                                creation_allowed = False
-                        incident, send_created_event = self._get_or_create_incident(
-                            rule=rule,
-                            rule_fingerprint=",".join(rule_fingerprint),
-                            session=session,
-                            event=event,
-                            creation_allowed=creation_allowed
-                        )
-                        if incident:
-                            incident = assign_alert_to_incident(
-                                fingerprint=event.fingerprint,
-                                incident=incident,
-                                tenant_id=self.tenant_id,
-                                session=session,
-                            )
-
-                            if not incident.is_visible:
-
-                                self.logger.info(
-                                    f"No existing incidents for rule {rule.name}. Checking incident creation conditions"
-                                )
-
-                                rule_groups = self._extract_subrules(
-                                    rule.definition_cel
-                                )
-                                firing_count = sum(
-                                    [
-                                        alert.event.get("unresolvedCounter", 1)
-                                        for alert in incident.alerts
-                                    ]
-                                )
-                                alerts_count = max(incident.alerts_count, firing_count)
-                                if alerts_count >= rule.threshold:
-                                    if not rule.require_approve:
-                                        if rule.create_on == "any" or (
-                                            rule.create_on == "all"
-                                            and len(rule_groups) == len(matched_rules)
-                                        ):
-                                            self.logger.info(
-                                                "Single event is enough, so creating incident"
-                                            )
-                                            incident.is_visible = True
-                                        elif rule.create_on == "all":
-                                            incident = self._process_event_for_history_based_rule(
-                                                incident, rule, session
-                                            )
-
-                                send_created_event = incident.is_visible
-
-                            # If we try to access incident.id inside except block, it will try to refresh
-                            # instance and raises PendingRollback error
-                            incident_id = incident.id
-
-                            # Incident instance might change till this moment (set visible for example),
-                            # so we need to commit changes
-                            # Otherwise sqlalchemy might try to do this in unpredictable moment
-                            for attempt in range(3):
-                                try:
-                                    # Explicitly add incident, but it most likely already there, since it was loaded in
-                                    # same session
-                                    session.add(incident)
-                                    session.commit()
-                                    break
-                                except StaleDataError as ex:
-                                    if "expected to update" in ex.args[0]:
-                                        self.logger.warning(
-                                            f"Race condition met while updating incident `{incident_id}`, retry #{attempt}"
-                                        )
-                                        session.rollback()
-                                        continue
-                                    else:
-                                        raise
-
-                            incident = IncidentBl(
-                                self.tenant_id, session
-                            ).resolve_incident_if_require(incident, handle_workflow_event=False)
-
-                            incident_dto = IncidentDto.from_db_incident(incident)
-                            if send_created_event:
-                                RulesEngine.send_workflow_event(
-                                    self.tenant_id, session, incident_dto, "created"
-                                )
-                            elif incident.is_visible:
-                                RulesEngine.send_workflow_event(
-                                    self.tenant_id, session, incident_dto, "updated"
-                                )
-
-                            incidents_dto[incident.id] = incident_dto
-
+                    matched_events.append((event, matched_rules))
+                    best_priority = best_priority_per_event.get(event.id)
+                    if best_priority is None or rule.priority < best_priority:
+                        best_priority_per_event[event.id] = rule.priority
                 else:
                     self.logger.info(
                         f"Rule {rule.name} on event {event.id} is not relevant"
                     )
+            matched_events_per_rule[rule.id] = matched_events
+
+        # Phase 2: execute the relevant rules. When multiple rules match the
+        # same event, only the rules with the best (lowest) priority are
+        # executed - rules with the same priority are all executed, while
+        # rules with a lower precedence (higher value) are skipped for that event
+        incidents_dto = {}
+        for rule in rules:
+            for event, matched_rules in matched_events_per_rule[rule.id]:
+                if rule.priority > best_priority_per_event[event.id]:
+                    self.logger.info(
+                        f"Rule {rule.name} on event {event.id} is skipped since it has a lower priority ({rule.priority}) "
+                        f"than another matching rule ({best_priority_per_event[event.id]})"
+                    )
+                    continue
+
+                rule_fingerprints = self._calc_rule_fingerprint(event, rule)
+
+                for rule_fingerprint in rule_fingerprints:
+                    # #If the alert recover its previous status, we need to check if there are any alerts with the same fingerprint that were resolved
+                    creation_allowed = True
+                    if hasattr(event, "previous_status") and (event.previous_status == AlertStatus.MAINTENANCE.value):
+                        alerts_solved = get_alerts_by_fingerprint(self.tenant_id, event.fingerprint, status=AlertStatus.RESOLVED.value)
+                        if alerts_solved and any(event.lastReceived < solved_alert.event["lastReceived"] for solved_alert in alerts_solved):
+                            creation_allowed = False
+                    incident, send_created_event = self._get_or_create_incident(
+                        rule=rule,
+                        rule_fingerprint=",".join(rule_fingerprint),
+                        session=session,
+                        event=event,
+                        creation_allowed=creation_allowed
+                    )
+                    if incident:
+                        incident = assign_alert_to_incident(
+                            fingerprint=event.fingerprint,
+                            incident=incident,
+                            tenant_id=self.tenant_id,
+                            session=session,
+                        )
+
+                        if not incident.is_visible:
+
+                            self.logger.info(
+                                f"No existing incidents for rule {rule.name}. Checking incident creation conditions"
+                            )
+
+                            rule_groups = self._extract_subrules(
+                                rule.definition_cel
+                            )
+                            firing_count = sum(
+                                [
+                                    alert.event.get("unresolvedCounter", 1)
+                                    for alert in incident.alerts
+                                ]
+                            )
+                            alerts_count = max(incident.alerts_count, firing_count)
+                            if alerts_count >= rule.threshold:
+                                if not rule.require_approve:
+                                    if rule.create_on == "any" or (
+                                        rule.create_on == "all"
+                                        and len(rule_groups) == len(matched_rules)
+                                    ):
+                                        self.logger.info(
+                                            "Single event is enough, so creating incident"
+                                        )
+                                        incident.is_visible = True
+                                    elif rule.create_on == "all":
+                                        incident = self._process_event_for_history_based_rule(
+                                            incident, rule, session
+                                        )
+
+                            send_created_event = incident.is_visible
+
+                        # If we try to access incident.id inside except block, it will try to refresh
+                        # instance and raises PendingRollback error
+                        incident_id = incident.id
+
+                        # Incident instance might change till this moment (set visible for example),
+                        # so we need to commit changes
+                        # Otherwise sqlalchemy might try to do this in unpredictable moment
+                        for attempt in range(3):
+                            try:
+                                # Explicitly add incident, but it most likely already there, since it was loaded in
+                                # same session
+                                session.add(incident)
+                                session.commit()
+                                break
+                            except StaleDataError as ex:
+                                if "expected to update" in ex.args[0]:
+                                    self.logger.warning(
+                                        f"Race condition met while updating incident `{incident_id}`, retry #{attempt}"
+                                    )
+                                    session.rollback()
+                                    continue
+                                else:
+                                    raise
+
+                        incident = IncidentBl(
+                            self.tenant_id, session
+                        ).resolve_incident_if_require(incident, handle_workflow_event=False)
+
+                        incident_dto = IncidentDto.from_db_incident(incident)
+                        if send_created_event:
+                            RulesEngine.send_workflow_event(
+                                self.tenant_id, session, incident_dto, "created"
+                            )
+                        elif incident.is_visible:
+                            RulesEngine.send_workflow_event(
+                                self.tenant_id, session, incident_dto, "updated"
+                            )
+
+                        incidents_dto[incident.id] = incident_dto
 
         self.logger.info("Rules ran successfully")
         # if we don't have any updated groups, we don't need to create any alerts

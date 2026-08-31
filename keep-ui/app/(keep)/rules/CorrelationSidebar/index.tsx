@@ -29,6 +29,7 @@ export const DEFAULT_CORRELATION_FORM_VALUES: CorrelationFormType = {
   multiLevelPropertyName: "",
   threshold: 1,
   assignee: undefined,
+  priority: 100,
   query: {
     combinator: "or",
     rules: [
@@ -83,6 +84,7 @@ export const CorrelationSidebar = ({
         multiLevelPropertyName: selectedRule.multi_level_property_name || "",
         threshold: selectedRule.threshold || 1,
         assignee: selectedRule.assignee,
+        priority: selectedRule.priority ?? 100,
       };
     }
 

@@ -10,7 +10,11 @@ from keep.api.core.db import get_rule_distribution as get_rule_distribution_db
 from keep.api.core.db import get_rule_incidents_count_db
 from keep.api.core.db import get_rules as get_rules_db
 from keep.api.core.db import update_rule as update_rule_db
-from keep.api.models.db.rule import CreateIncidentOn, ResolveOn
+from keep.api.models.db.rule import (
+    RULE_DEFAULT_PRIORITY,
+    CreateIncidentOn,
+    ResolveOn,
+)
 from keep.identitymanager.authenticatedentity import AuthenticatedEntity
 from keep.identitymanager.identitymanagerfactory import IdentityManagerFactory
 
@@ -36,6 +40,7 @@ class RuleCreateDto(BaseModel):
     multiLevelPropertyName: str = None
     threshold: int = 1
     assignee: str = None
+    priority: int = RULE_DEFAULT_PRIORITY
 
 
 @router.get(
@@ -96,6 +101,7 @@ async def create_rule(
     multi_level_property_name = rule_create_request.multiLevelPropertyName
     threshold = rule_create_request.threshold
     assignee = rule_create_request.assignee
+    priority = rule_create_request.priority
 
     if not sql:
         raise HTTPException(status_code=400, detail="SQL is required")
@@ -125,6 +131,11 @@ async def create_rule(
     if not threshold:
         raise HTTPException(status_code=400, detail="threshold is required")
 
+    if priority < 1:
+        raise HTTPException(
+            status_code=400, detail="Priority must be a positive integer"
+        )
+
     rule = create_rule_db(
         tenant_id=tenant_id,
         name=rule_name,
@@ -147,6 +158,7 @@ async def create_rule(
         multi_level_property_name=multi_level_property_name,
         threshold=threshold,
         assignee=assignee,
+        priority=priority,
     )
     logger.info("Rule created")
     return rule
@@ -204,6 +216,7 @@ async def update_rule(
         multi_level_property_name = body.get("multiLevelPropertyName", None)
         threshold = body.get("threshold", 1)
         assignee = body.get("assignee", None)
+        priority = body.get("priority", RULE_DEFAULT_PRIORITY)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid request body")
 
@@ -239,6 +252,11 @@ async def update_rule(
     if not threshold:
         raise HTTPException(status_code=400, detail="threshold is required")
 
+    if priority < 1:
+        raise HTTPException(
+            status_code=400, detail="Priority must be a positive integer"
+        )
+
     rule = update_rule_db(
         tenant_id=tenant_id,
         rule_id=rule_id,
@@ -261,6 +279,7 @@ async def update_rule(
         multi_level_property_name=multi_level_property_name,
         threshold=threshold,
         assignee=assignee,
+        priority=priority,
     )
 
     if rule:
